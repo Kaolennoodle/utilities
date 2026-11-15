@@ -20,10 +20,10 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDDGGejG7Vqb8azmthZFegM35GOjQlfiQ88LYo4BXPoM
 
 1. 保留当前 root SSH 窗口，在该窗口运行脚本。需要 Ubuntu 26.04、运行中的标准 `ssh.service`、systemd、Python 3、OpenSSH、flock 和常用系统工具。脚本不会安装组件。
 2. 本地文件可直接执行：`bash scripts/setup-ssh.sh`（将脚本上传至目标服务器后执行，不是在个人电脑上执行）。
-3. 在服务器当前的 root SSH 会话中整行执行下方命令。命令先完整下载，下载成功才执行。
+3. 在服务器当前的 root SSH 会话中整行执行下方命令。命令会直接下载并执行仓库 main 分支上的脚本。
 
 ```bash
-(set -e; script=$(mktemp); trap 'rm -f "$script"' EXIT; curl --proto '=https' --tlsv1.2 -fsSL 'https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/setup-ssh.sh' -o "$script"; bash "$script")
+curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/setup-ssh.sh | bash
 ```
 
 `main` 会随仓库更新而变化。正式长期使用时，建议将 URL 中的 `main` 换成你审查过的完整提交 SHA，以固定脚本版本。
