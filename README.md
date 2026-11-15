@@ -1,10 +1,19 @@
 # 实用工具 · utilities
 
-面向 Ubuntu 26.04 的 root SSH 公钥初始化工具。安装指定公钥，禁用所有用户的 SSH 密码和键盘交互认证，要求公钥认证；验证配置后仅重载 SSH 服务。
+常用服务器脚本集合，面向 Ubuntu 26.04。包含 root SSH 公钥初始化和 Hysteria2 安装管理工具。
 
 ## 仓库
 
 [Kaolennoodle/utilities](https://github.com/Kaolennoodle/utilities) 为公开仓库，服务器无需登录 GitHub 即可下载脚本。仓库只包含公钥，不包含私钥、访问令牌或服务器地址。
+
+## 脚本列表
+
+| 脚本 | 用途 |
+| --- | --- |
+| [setup-ssh.sh](scripts/setup-ssh.sh) | 安装 root SSH 公钥、禁用密码认证，提供验证及定时回滚 |
+| [hy2.sh](scripts/hy2.sh) | Hysteria2 安装和管理，支持中文/英文菜单、证书及分享配置 |
+
+以下公钥及 SSH 连接测试说明适用于 `setup-ssh.sh`。
 
 ## 内置公钥
 
@@ -73,3 +82,16 @@ python3 tests/test_setup_ssh.py
 已在本地通过 Bash 语法检查、ShellCheck 和 13 项检查：真实 OpenSSH 解析的优先级及最终配置值、嵌套 Match 拒绝、Include 循环及歧义语法拒绝、默认空启动参数和自定义覆盖参数检查、重复运行、受损标记、无效配置、公钥去重，以及隔离环境中的恢复、重试、跨连接确认与文件变化检查。
 
 当前本地验证使用 macOS OpenSSH 10.5；恢复检查模拟了 systemd、文件锁和所有权操作。**尚未在真实 Ubuntu 26.04/systemd 环境完成端到端登录及计时回滚验证，也未运行在你的服务器上。**
+## Hysteria2 安装与管理
+
+[hy2.sh](scripts/hy2.sh) 为原样收录的 v1.1.0 脚本，面向 Ubuntu 26.04，以 root 运行。提供交互菜单、官方核心安装、内置 ACME 证书申请、伪装站点配置、分享链接/二维码、客户端配置及更新/卸载功能。
+
+在服务器 root 终端执行，下载后进入中文菜单：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh -o hy2.sh && bash hy2.sh --lang zh
+```
+
+脚本通过终端读取交互输入；先保存再运行，也便于安装 `hy2` 快捷命令。安装完成后可用 `hy2` 再次打开菜单。可通过 `bash hy2.sh --help` 查看参数。
+
+已完成 Bash 语法检查；本次上传未在服务器执行安装或验证部署。
