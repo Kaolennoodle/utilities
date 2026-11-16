@@ -1,0 +1,30 @@
+# Hysteria2 server configuration — rendered by install.sh
+# UDP 443 + QUIC/TLS1.3 + password auth + file masquerade.
+listen: 0.0.0.0:443
+
+tls:
+  cert: __CERT_FULLCHAIN__
+  key: __CERT_KEY__
+  # Enforce that the client SNI matches the certificate SAN.
+  sniGuard: strict
+
+auth:
+  type: password
+  password: __HY_PASSWORD__
+
+# Serve the same static blog over HTTP/3 as the TCP/443 Reality fallback.
+masquerade:
+  type: file
+  file:
+    dir: __SITE_CURRENT__
+
+# Outbound protection: block cloud metadata, loopback, link-local, multicast
+# and (optionally) private ranges. NOTE: this only affects authenticated proxy
+# traffic; the Reality fallback to the local Nginx is inbound-side and is NOT
+# governed by these ACL rules.
+acl:
+  inline:
+__ACL_RULES__
+
+# Conservative defaults. No bandwidth (Brutal) limits, BBR congestion control,
+# UDP forwarding enabled, public speed-test disabled (all are defaults).
