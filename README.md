@@ -1,6 +1,6 @@
 # 实用工具 · utilities
 
-常用服务器脚本集合，面向 Ubuntu 26.04。包含 root SSH 公钥初始化和 Hysteria2 安装管理工具。
+常用服务器脚本集合，面向 Ubuntu 26.04。包含 root SSH 公钥初始化、Hysteria2 安装管理工具，以及 dual-proxy 部署项目。
 
 ## 仓库
 
@@ -12,6 +12,7 @@
 | --- | --- |
 | [setup-ssh.sh](scripts/setup-ssh.sh) | 安装 root SSH 公钥、禁用密码认证，提供验证及定时回滚 |
 | [hy2.sh](scripts/hy2.sh) | Hysteria2 安装和管理，支持中文/英文菜单、证书及分享配置 |
+| [dual-proxy/](dual-proxy/) | VLESS+Reality（TCP 443）、Hysteria2（UDP 443）与静态网站部署维护（多文件项目，用法见其 README） |
 
 以下公钥及 SSH 连接测试说明适用于 `setup-ssh.sh`。
 
