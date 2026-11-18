@@ -5,7 +5,7 @@
 # Target    : fresh Ubuntu 26.04 LTS, run as root
 # Features  : official core install, Let's Encrypt cert via Hysteria built-in ACME,
 #             proxy on UDP 443, your own masquerade site, systemd autostart,
-#             share link / QR code / client snippets, EN / 中文 UI.
+#             node share link, self-update, EN / 中文 UI.
 #
 # Usage:
 #   curl -fsSL <raw-url>/hy2.sh | bash -s -- --lang zh    run via pipe
@@ -14,12 +14,15 @@
 #   bash hy2.sh install --domain hy.example.com --masq https://www.example.com \
 #        [--email me@example.com] [--password xxx] [--name MyNode] \
 #        [--bw-mode client|limit|bbr] [--up 100] [--down 100] [--yes]
-#   hy2 link | status | update | uninstall
+#   hy2 link | status | update | self-update | uninstall
 #
 
-SCRIPT_VERSION="1.3.1"
-# Optional: raw URL of this script, used to install the 'hy2' shortcut when the
-# script is executed through a pipe (e.g. curl ... | bash, bash <(curl ...)).
+SCRIPT_VERSION="1.4.0"
+# Oldest installed version this script can take over in place. Installs made by
+# older versions must be uninstalled and installed again.
+MIN_UPGRADE_VERSION="1.3.1"
+# Raw URL of this script: used for self-update and to install the 'hy2'
+# shortcut when the script is run through a pipe (curl ... | bash).
 SCRIPT_URL="https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh"
 # 1 when the script itself is read from stdin (curl ... | bash); $0 is then the
 # shell (e.g. /bin/bash), not this script.
@@ -48,6 +51,7 @@ CMD=menu UI_LANG=${HY2_LANG:-en} LANG_SET=${HY2_LANG:+1} ASSUME_YES=0
 OPT_DOMAIN="" OPT_MASQ="" OPT_EMAIL="" OPT_EMAIL_SET="" OPT_PASSWORD="" OPT_NAME=""
 OPT_UP="" OPT_DOWN="" OPT_BW_MODE=""
 PUB_IP4="" PUB_IP6="" IPS_DETECTED="" LAST_BACKUP_TS=""
+INSTALLED_VERSION="" REMOTE_VERSION=""
 
 # ---------------------------------------------------------------------------
 # i18n
@@ -111,11 +115,6 @@ M_EN=(
   [bw_limit]="Server limit: upload %s (= client download) / download %s (= client upload)"
   [bw_bbr]="Force BBR (client bandwidth ignored)"
   [bw_unlimited]="unlimited"
-  [bw_note]="Bandwidth (optional): set YOUR local network's real upload/download speed in the client to use Brutal; leave it out to use BBR. Never set it higher than your real bandwidth. Fields: mihomo up/down, sing-box up_mbps/down_mbps."
-  [bw_note_limit]="Server limit: clients download at most %s and upload at most %s; higher client values are capped."
-  [bw_note_bbr]="The server forces BBR: client bandwidth settings are ignored, no need to set them."
-  [bw_c_up]="optional: your upload speed"
-  [bw_c_down]="optional: your download speed"
   [port_busy]="Port %s/%s is already in use:"
   [port80_required]="TCP 80 is required for certificate issuance (ACME HTTP-01). Free it and try again."
   [udp443_required]="UDP 443 is required by Hysteria2. Free it and try again."
@@ -148,20 +147,32 @@ M_EN=(
   [fail_hints]="Common causes: DNS not pointing here, TCP 80 blocked by the security group, Let's Encrypt rate limit."
   [install_done]="Installation complete! Run 'hy2' to open this menu again."
   [shortcut_ok]="Shortcut installed: %s"
-  [shortcut_skip]="Could not install the 'hy2' shortcut (script was not run from a file and SCRIPT_URL is empty)."
+  [shortcut_skip]="Could not install the 'hy2' shortcut; run the script again later."
   [not_installed]="Hysteria2 is not installed. Please install it first."
   [no_state]="Hysteria2 was not installed by this script (state file missing). Please reinstall with this script."
   [already_installed]="Hysteria2 is already installed. Reinstall and overwrite the current configuration?"
-  [share_title]="Share link"
-  [qr_title]="QR code"
-  [qr_missing]="qrencode not found, QR code skipped."
-  [mihomo_title]="Clash Meta (mihomo) proxy"
-  [singbox_title]="sing-box outbound"
+  [share_title]="Node link"
   [updating]="Updating Hysteria2 core ..."
   [update_done]="Core version: %s -> %s"
   [uninstall_confirm]="This removes Hysteria2, its configuration and certificates. Continue?"
   [remove_warn]="Official removal script failed, cleaning up manually."
   [uninstall_done]="Hysteria2 has been uninstalled."
+  [ver_installed]="Installed by"
+  [ver_new_avail]="New script version available: v%s"
+  [ver_legacy1]="This server was set up by hy2.sh %s, which is too old to be upgraded in place (v%s or later required)."
+  [ver_legacy2]="Please uninstall completely, then install again with this script. Note down the node link first if you want to reuse the password."
+  [ver_legacy_short]="too old, reinstall required"
+  [ver_unknown]="an unknown older version"
+  [ver_newer]="This server is managed by a newer hy2.sh (v%s). Please run the latest script: %s"
+  [ver_blocked]="Not available for this installation."
+  [ver_adopted]="Management script upgraded: v%s -> v%s (node configuration unchanged)."
+  [su_checking]="Checking for script updates..."
+  [su_fetch_fail]="Could not download the script from %s."
+  [su_invalid]="The downloaded file is not a valid hy2.sh, update aborted."
+  [su_latest]="Already up to date (v%s)."
+  [su_confirm]="Update the management script from v%s to v%s now?"
+  [su_done]="Management script updated to v%s, restarting it..."
+  [su_prompt]="A new version v%s is available (current v%s). Update now?"
   [backup_restored]="Change failed, the previous configuration has been restored."
   [no_change]="No change."
   [saved]="Saved."
@@ -200,8 +211,8 @@ M_EN=(
   [m_modify_h]="Modify configuration"
   [m_cert_h]="Certificate"
   [m_service_h]="Start / Stop / Restart"
-  [m_share]="Show share link / QR code / client config"
-  [m_showconf]="Show configuration file"
+  [m_share]="Show node link"
+  [m_selfupdate]="Update this management script"
   [m_modify]="Modify configuration  >"
   [m_cert]="Certificate  >"
   [m_service]="Start / Stop / Restart  >"
@@ -283,11 +294,6 @@ M_ZH=(
   [bw_limit]="服务器限速：上传 %s（= 客户端下载）/ 下载 %s（= 客户端上传）"
   [bw_bbr]="强制 BBR（忽略客户端带宽设置）"
   [bw_unlimited]="不限"
-  [bw_note]="带宽（可选）：在客户端填写【你本地网络】的实际上传/下载速度即使用 Brutal，不填则使用 BBR。切勿高于实际带宽，否则会变慢、不稳定。字段：mihomo 为 up/down，sing-box 为 up_mbps/down_mbps。"
-  [bw_note_limit]="服务器已限速：客户端下载最多 %s，上传最多 %s；客户端填写更高的值也会被限制。"
-  [bw_note_bbr]="服务器强制使用 BBR，客户端的带宽设置会被忽略，无需填写。"
-  [bw_c_up]="可选：本机上传速度"
-  [bw_c_down]="可选：本机下载速度"
   [port_busy]="端口 %s/%s 已被占用："
   [port80_required]="申请证书（ACME HTTP-01）需要使用 TCP 80 端口，请释放后重试。"
   [udp443_required]="Hysteria2 需要使用 UDP 443 端口，请释放后重试。"
@@ -320,20 +326,32 @@ M_ZH=(
   [fail_hints]="常见原因：域名未解析到本机、安全组未放行 TCP 80、触发 Let's Encrypt 频率限制。"
   [install_done]="安装完成！之后输入 hy2 即可再次打开本菜单。"
   [shortcut_ok]="已安装快捷命令：%s"
-  [shortcut_skip]="无法安装 hy2 快捷命令（脚本不是从文件运行的，且未设置 SCRIPT_URL）。"
+  [shortcut_skip]="无法安装 hy2 快捷命令，请稍后重新运行本脚本。"
   [not_installed]="Hysteria2 尚未安装，请先安装。"
   [no_state]="当前 Hysteria2 不是由本脚本安装的（缺少状态文件），请使用本脚本重新安装。"
   [already_installed]="Hysteria2 已安装，是否重新安装并覆盖当前配置？"
-  [share_title]="分享链接"
-  [qr_title]="二维码"
-  [qr_missing]="未找到 qrencode，跳过二维码。"
-  [mihomo_title]="Clash Meta (mihomo) 节点配置"
-  [singbox_title]="sing-box 出站配置"
+  [share_title]="节点链接"
   [updating]="正在更新 Hysteria2 内核……"
   [update_done]="内核版本：%s -> %s"
   [uninstall_confirm]="将删除 Hysteria2 及其配置和证书，是否继续？"
   [remove_warn]="官方卸载脚本执行失败，改为手动清理。"
   [uninstall_done]="Hysteria2 已卸载。"
+  [ver_installed]="安装版本"
+  [ver_new_avail]="管理脚本有新版本：v%s"
+  [ver_legacy1]="本机由 hy2.sh %s 安装，版本过旧，无法直接升级（需要 v%s 或更新）。"
+  [ver_legacy2]="请先完全卸载，再用本脚本重新安装。如需沿用原密码，请先记下节点链接。"
+  [ver_legacy_short]="版本过旧，需重新安装"
+  [ver_unknown]="未知的旧版本"
+  [ver_newer]="本机由更新的 hy2.sh（v%s）管理，请运行最新脚本：%s"
+  [ver_blocked]="当前安装不支持此操作。"
+  [ver_adopted]="管理脚本已升级：v%s -> v%s（节点配置未改变）。"
+  [su_checking]="正在检查脚本更新……"
+  [su_fetch_fail]="无法从 %s 下载脚本。"
+  [su_invalid]="下载的文件不是有效的 hy2.sh，已取消更新。"
+  [su_latest]="已是最新版本（v%s）。"
+  [su_confirm]="将管理脚本从 v%s 更新到 v%s？"
+  [su_done]="管理脚本已更新到 v%s，正在重新启动……"
+  [su_prompt]="发现新版本 v%s（当前 v%s），是否立即更新？"
   [backup_restored]="修改失败，已恢复之前的配置。"
   [no_change]="没有变化。"
   [saved]="已保存。"
@@ -372,8 +390,8 @@ M_ZH=(
   [m_modify_h]="修改配置"
   [m_cert_h]="证书管理"
   [m_service_h]="启动 / 停止 / 重启"
-  [m_share]="查看分享链接 / 二维码 / 客户端配置"
-  [m_showconf]="查看配置文件"
+  [m_share]="查看节点链接"
+  [m_selfupdate]="更新管理脚本"
   [m_modify]="修改配置  ▶"
   [m_cert]="证书管理  ▶"
   [m_service]="启动 / 停止 / 重启  ▶"
@@ -543,6 +561,7 @@ save_state() {
   (
     umask 077
     {
+      printf 'INSTALLED_VERSION=%q\n' "$SCRIPT_VERSION"
       printf 'DOMAIN=%q\n' "$DOMAIN"
       printf 'EMAIL=%q\n' "$EMAIL"
       printf 'PASSWORD=%q\n' "$PASSWORD"
@@ -559,8 +578,9 @@ save_state() {
 }
 
 load_state() {
-  # shellcheck disable=SC1090
+  INSTALLED_VERSION=""
   if [[ -f $HY_STATE ]]; then
+    # shellcheck disable=SC1090
     . "$HY_STATE"
     BW_UP=$(parse_bw "${BW_UP:-0}") || BW_UP=0
     BW_DOWN=$(parse_bw "${BW_DOWN:-0}") || BW_DOWN=0
@@ -597,7 +617,7 @@ check_os() {
 
 install_deps() {
   local p missing=()
-  for p in curl ca-certificates openssl qrencode bind9-dnsutils iproute2; do
+  for p in curl ca-certificates openssl bind9-dnsutils iproute2; do
     dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p")
   done
   ((${#missing[@]})) || return 0
@@ -955,18 +975,20 @@ sync_firewall() {
   warn "$(t fw_cloud)"
 }
 
+# Install this script as /usr/local/bin/hy2. When run through a pipe there is
+# no local file, so the published script is downloaded and validated first.
+# The shortcut is replaced atomically (never left half-written).
 install_shortcut() {
-  local src=""
+  local src="" tmp
   ((FROM_PIPE)) || src=$(readlink -f "$0" 2>/dev/null)
-  if [[ -f $src && $src != "$SHORTCUT" ]]; then
-    install -m 755 "$src" "$SHORTCUT" && info "$(t shortcut_ok "$SHORTCUT")"
-  elif [[ $src == "$SHORTCUT" ]]; then
-    return 0
-  elif [[ -n $SCRIPT_URL ]] && curl -fsSL "$SCRIPT_URL" -o "$SHORTCUT"; then
-    chmod 755 "$SHORTCUT" && info "$(t shortcut_ok "$SHORTCUT")"
-  else
-    warn "$(t shortcut_skip)"
+  [[ $src == "$SHORTCUT" ]] && return 0
+  tmp=$(mktemp "$SHORTCUT.XXXXXX") || { warn "$(t shortcut_skip)"; return 1; }
+  if [[ -f $src ]] && grep -q '^# hy2.sh - Hysteria2' "$src"; then
+    cp "$src" "$tmp"
+  elif ! fetch_script "$tmp" >/dev/null; then
+    rm -f "$tmp"; warn "$(t shortcut_skip)"; return 1
   fi
+  chmod 755 "$tmp" && mv -f "$tmp" "$SHORTCUT" && info "$(t shortcut_ok "$SHORTCUT")"
 }
 
 # Restart the service and wait until it is serving (certificate obtained).
@@ -1040,9 +1062,135 @@ apply_change() {
 }
 
 # ---------------------------------------------------------------------------
+# Versioning / self-update
+# ---------------------------------------------------------------------------
+# ver_cmp A B -> prints -1, 0 or 1 (numeric dotted versions, e.g. 1.10.0 > 1.9.2)
+ver_cmp() {
+  local i a b x y
+  IFS=. read -ra x <<<"$1"
+  IFS=. read -ra y <<<"$2"
+  for ((i = 0; i < 3; i++)); do
+    a=$((10#${x[i]:-0})) b=$((10#${y[i]:-0}))
+    ((a > b)) && { echo 1; return; }
+    ((a < b)) && { echo -1; return; }
+  done
+  echo 0
+}
+ver_lt() { [[ $(ver_cmp "$1" "$2") == -1 ]]; }
+
+# Version that manages the current installation. v1.4.0+ records it in the
+# state file; v1.3.1 is recognised by its config header plus BW_MODE in state.
+detect_installed_version() {
+  [[ -f $HY_STATE ]] || return 1
+  if [[ -n $INSTALLED_VERSION ]]; then echo "$INSTALLED_VERSION"; return; fi
+  local v
+  v=$(sed -n '1s/^# Generated by hy2.sh v\([0-9.]*\) .*/\1/p' "$HY_CONF" 2>/dev/null)
+  if [[ -n $v ]] && grep -q '^BW_MODE=' "$HY_STATE"; then echo "$v"; else echo "${v:-unknown}"; fi
+}
+
+# none | partial | legacy | newer | current
+#   legacy : installed by a version older than MIN_UPGRADE_VERSION
+#   newer  : installed by a newer version than this script
+version_state() {
+  local v
+  if ! is_installed || [[ ! -f $HY_STATE ]]; then
+    if [[ -x $HY_BIN || -d $HY_DIR ]]; then echo partial; else echo none; fi
+    return
+  fi
+  v=$(detect_installed_version)
+  if [[ $v == unknown ]] || ver_lt "$v" "$MIN_UPGRADE_VERSION"; then echo legacy
+  elif ver_lt "$SCRIPT_VERSION" "$v"; then echo newer
+  else echo current; fi
+}
+
+legacy_notice() {
+  local v
+  v=$(detect_installed_version)
+  if [[ $v == unknown ]]; then v=$(t ver_unknown); else v="v$v"; fi
+  warn "$(t ver_legacy1 "$v" "$MIN_UPGRADE_VERSION")"
+  warn "$(t ver_legacy2)"
+}
+
+# Take over an installation made by an older (supported) version: record the
+# new version in the state file and refresh the 'hy2' shortcut. The Hysteria
+# config and the service are left untouched, so the node stays the same.
+# Future format migrations go here, keyed on $from.
+adopt_installation() {
+  local from
+  [[ $(version_state) == current ]] || return 0
+  from=$(detect_installed_version)
+  [[ $from == "$SCRIPT_VERSION" ]] && { sync_shortcut; return 0; }
+  save_state
+  sync_shortcut
+  info "$(t ver_adopted "$from" "$SCRIPT_VERSION")"
+}
+
+# script_file_version FILE -> SCRIPT_VERSION declared in FILE
+script_file_version() { sed -n 's/^SCRIPT_VERSION="\([0-9.]*\)"$/\1/p' "$1" 2>/dev/null | head -n 1; }
+
+# Keep /usr/local/bin/hy2 at least as new as this script (it may be missing,
+# outdated, or not a hy2.sh at all).
+sync_shortcut() {
+  local v
+  v=$(script_file_version "$SHORTCUT")
+  [[ -n $v ]] && ! ver_lt "$v" "$SCRIPT_VERSION" && return 0
+  install_shortcut
+}
+
+# fetch_script FILE -> download and validate the latest script; prints version
+fetch_script() {
+  local v
+  curl -fsSL --max-time "${2:-20}" "$SCRIPT_URL" -o "$1" 2>/dev/null || { err "$(t su_fetch_fail "$SCRIPT_URL")"; return 1; }
+  v=$(script_file_version "$1")
+  if [[ -z $v ]] || ! grep -q '^# hy2.sh - Hysteria2' "$1" || ! bash -n "$1" 2>/dev/null; then
+    err "$(t su_invalid)"; return 1
+  fi
+  echo "$v"
+}
+
+# Quick, silent check used by the menu (skipped with HY2_NO_UPDATE_CHECK=1).
+check_remote_version() {
+  [[ -n ${HY2_NO_UPDATE_CHECK:-} ]] && return 0
+  REMOTE_VERSION=$(curl -fsSL --max-time 3 "$SCRIPT_URL" 2>/dev/null |
+    sed -n 's/^SCRIPT_VERSION="\([0-9.]*\)"$/\1/p' | head -n 1)
+}
+
+update_available() { [[ -n $REMOTE_VERSION ]] && ver_lt "$SCRIPT_VERSION" "$REMOTE_VERSION"; }
+
+# self_update [--yes] - replace the hy2 shortcut with the latest script and
+# restart into it. The new version then adopts the installation on start.
+self_update() {
+  local tmp v
+  info "$(t su_checking)"
+  tmp=$(mktemp "$SHORTCUT.XXXXXX") || return 1
+  if ! v=$(fetch_script "$tmp"); then rm -f "$tmp"; return 1; fi
+  if ! ver_lt "$SCRIPT_VERSION" "$v"; then
+    info "$(t su_latest "$SCRIPT_VERSION")"; rm -f "$tmp"; sync_shortcut; return 0
+  fi
+  if [[ $1 != --yes ]] && ! confirm "$(t su_confirm "$SCRIPT_VERSION" "$v")" y; then
+    rm -f "$tmp"; info "$(t aborted)"; return 0
+  fi
+  chmod 755 "$tmp" && mv -f "$tmp" "$SHORTCUT" || { rm -f "$tmp"; return 1; }
+  info "$(t su_done "$v")"
+  # Hand over to the new version; it adopts the installation when it starts.
+  [[ $CMD == menu ]] && HY2_NO_UPDATE_CHECK=1 exec bash "$SHORTCUT" --lang "$UI_LANG"
+  exit 0
+}
+
+# Refuse commands that would modify an installation this script cannot manage.
+require_manageable() {
+  case $(version_state) in
+    legacy) legacy_notice; return 1 ;;
+    newer) err "$(t ver_newer "$(detect_installed_version)" "curl -fsSL $SCRIPT_URL | sudo bash")"; return 1 ;;
+  esac
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Actions
 # ---------------------------------------------------------------------------
 do_install() {
+  require_manageable || return 1
   check_os
   if is_installed; then
     load_state
@@ -1077,6 +1225,7 @@ do_install() {
 
 do_update() {
   need_installed || return 1
+  require_manageable || return 1
   local old new
   old=$(core_version)
   info "$(t updating)"
@@ -1112,61 +1261,8 @@ do_uninstall() {
 
 show_share() {
   need_installed || return 1
-  local link name_json
-  link="hysteria2://$(urlencode "$PASSWORD")@$DOMAIN:$PORT/?sni=$DOMAIN#$(urlencode "$NODE_NAME")"
-  name_json=${NODE_NAME//\\/\\\\}; name_json=${name_json//\"/\\\"}
-
   title "$(t share_title)"
-  echo "$link"
-
-  title "$(t qr_title)"
-  if command -v qrencode >/dev/null; then qrencode -t ANSIUTF8 -m 2 "$link"; else warn "$(t qr_missing)"; fi
-
-  title "$(t mihomo_title)"
-  cat <<EOF
-- name: "$name_json"
-  type: hysteria2
-  server: $DOMAIN
-  port: $PORT
-  password: "$PASSWORD"
-  sni: $DOMAIN
-EOF
-  if [[ $BW_MODE != bbr ]]; then
-    echo "  # up: \"30 Mbps\"      # $(t bw_c_up)"
-    echo "  # down: \"200 Mbps\"   # $(t bw_c_down)"
-  fi
-  cat <<EOF
-  alpn:
-    - h3
-EOF
-
-  title "$(t singbox_title)"
-  cat <<EOF
-{
-  "type": "hysteria2",
-  "tag": "$name_json",
-  "server": "$DOMAIN",
-  "server_port": $PORT,
-  "password": "$PASSWORD",
-  "tls": {
-    "enabled": true,
-    "server_name": "$DOMAIN",
-    "alpn": ["h3"]
-  }
-}
-EOF
-  echo
-  case $BW_MODE in
-    bbr) warn "$(t bw_note_bbr)" ;;
-    limit) warn "$(t bw_note)"; warn "$(t bw_note_limit "$(bw_value "$BW_UP")" "$(bw_value "$BW_DOWN")")" ;;
-    *) warn "$(t bw_note)" ;;
-  esac
-}
-
-show_config() {
-  need_installed || return 1
-  title "$HY_CONF"
-  cat "$HY_CONF"
+  echo "hysteria2://$(urlencode "$PASSWORD")@$DOMAIN:$PORT/?sni=$DOMAIN#$(urlencode "$NODE_NAME")"
 }
 
 show_status() {
@@ -1226,15 +1322,7 @@ menu_item()    { MENU_KIND+=("$1"); MENU_FN+=("$2"); MENU_TXT+=("$3"); }
 
 # managed = installed by this script; partial = core/config present but not
 # manageable (foreign install or leftovers); none = nothing installed.
-install_state() {
-  if is_installed && [[ -f $HY_STATE ]]; then
-    echo managed
-  elif [[ -x $HY_BIN || -d $HY_DIR ]]; then
-    echo partial
-  else
-    echo none
-  fi
-}
+install_state() { version_state; }
 
 toggle_lang() { if [[ $UI_LANG == zh ]]; then UI_LANG=en; else UI_LANG=zh; fi; }
 
@@ -1248,8 +1336,10 @@ read_choice() {
 
 print_header() {
   local st ver="-" auto="-"
-  case $(install_state) in
-    managed | partial)
+  local vs
+  vs=$(install_state)
+  case $vs in
+    current | legacy | newer | partial)
       if systemctl is-active --quiet "$HY_SERVICE"; then
         st="\033[32m● $(t st_running)\033[0m"
       else
@@ -1257,7 +1347,8 @@ print_header() {
       fi
       ver=$(core_version)
       if systemctl is-enabled --quiet "$HY_SERVICE" 2>/dev/null; then auto=$(t yes); else auto=$(t no); fi
-      [[ -f $HY_STATE ]] || st+=" \033[33m($(t st_partial))\033[0m"
+      [[ $vs == partial ]] && st+=" \033[33m($(t st_partial))\033[0m"
+      [[ $vs == legacy ]] && st+=" \033[31m($(t ver_legacy_short))\033[0m"
       ;;
     none) st="\033[33m● $(t st_notinst)\033[0m" ;;
   esac
@@ -1265,7 +1356,10 @@ print_header() {
   echo "   $(t m_title)  v$SCRIPT_VERSION"
   echo -e "   $(t lbl_status): $st   $(t lbl_version): ${ver:--}   $(t lbl_autostart): $auto"
   [[ -f $HY_STATE && -n $DOMAIN ]] && echo "   $(t lbl_endpoint): $DOMAIN:$PORT/udp"
+  if update_available; then echo -e "   \033[33m$(t ver_new_avail "$REMOTE_VERSION")\033[0m"; fi
   echo "=============================================="
+  [[ $vs == legacy ]] && legacy_notice
+  [[ $vs == newer ]] && err "$(t ver_newer "$(detect_installed_version)" "curl -fsSL $SCRIPT_URL | sudo bash")"
 }
 
 # menu_render HEADING - HEADING is empty for the main menu.
@@ -1319,7 +1413,7 @@ menu_loop() {
 build_main() {
   menu_begin
   case $(install_state) in
-    managed)
+    current)
       menu_section "$(t m_sec_common)"
       menu_item act show_share "$(t m_share)"
       menu_item act show_status "$(t m_status)"
@@ -1328,23 +1422,40 @@ build_main() {
       menu_item sub menu_modify "$(t m_modify)"
       menu_item sub menu_cert "$(t m_cert)"
       menu_item sub menu_service "$(t m_service)"
-      menu_item act show_config "$(t m_showconf)"
       menu_section "$(t m_sec_maint)"
+      menu_item act self_update "$(t m_selfupdate)"
       menu_item act do_update "$(t m_update)"
       menu_item danger do_install "$(t m_reinstall)"
       menu_item danger do_uninstall "$(t m_uninstall)"
       ;;
+    legacy)
+      menu_item act show_share "$(t m_share)"
+      menu_item danger do_uninstall "$(t m_uninstall)"
+      ;;
+    newer)
+      menu_item act show_share "$(t m_share)"
+      menu_item act self_update "$(t m_selfupdate)"
+      ;;
     partial)
       menu_item act do_install "$(t m_install)"
+      menu_item act self_update "$(t m_selfupdate)"
       menu_item danger do_uninstall "$(t m_uninstall)"
       ;;
     none)
       menu_item act do_install "$(t m_install)"
+      menu_item act self_update "$(t m_selfupdate)"
       ;;
   esac
 }
 
-main_menu() { menu_loop build_main; }
+# Check for a newer script once per menu session and offer to update.
+main_menu() {
+  ((FROM_PIPE)) || check_remote_version
+  if update_available && [[ -t 0 ]] && confirm "$(t su_prompt "$REMOTE_VERSION" "$SCRIPT_VERSION")" y; then
+    self_update --yes
+  fi
+  menu_loop build_main
+}
 
 # --- modify -----------------------------------------------------------------
 modify_password() { collect_password new; apply_change; }
@@ -1399,7 +1510,7 @@ build_modify() {
   menu_item act modify_bw "$(t mm_bw)   ($(t current): $(bw_label))"
 }
 
-menu_modify() { need_installed || return 1; menu_loop build_modify m_modify_h; }
+menu_modify() { need_installed || return 1; require_manageable || return 1; menu_loop build_modify m_modify_h; }
 
 # --- certificate --------------------------------------------------------------
 build_cert() {
@@ -1408,7 +1519,7 @@ build_cert() {
   menu_item danger reissue_cert "$(t mc_reissue)"
 }
 
-menu_cert() { need_installed || return 1; menu_loop build_cert m_cert_h; }
+menu_cert() { need_installed || return 1; require_manageable || return 1; menu_loop build_cert m_cert_h; }
 
 # --- service ------------------------------------------------------------------
 service_stop() { systemctl stop "$HY_SERVICE" && info "$(t stopped_ok)"; }
@@ -1424,7 +1535,7 @@ build_service() {
   fi
 }
 
-menu_service() { need_installed || return 1; menu_loop build_service m_service_h; }
+menu_service() { need_installed || return 1; require_manageable || return 1; menu_loop build_service m_service_h; }
 
 usage() {
   cat <<EOF
@@ -1435,9 +1546,10 @@ Usage: hy2 [command] [options]
 Commands:
   menu         Interactive menu (default)
   install      Install and configure Hysteria2
-  link         Show share link / QR code / client config
+  link         Show the node link
   status       Show service status
   update       Update Hysteria2 core
+  self-update  Update this management script (keeps the node configuration)
   uninstall    Remove Hysteria2
 
 Options:
@@ -1463,7 +1575,7 @@ EOF
 parse_args() {
   while (($#)); do
     case $1 in
-      menu | install | link | status | update | uninstall) CMD=$1 ;;
+      menu | install | link | status | update | self-update | uninstall) CMD=$1 ;;
       --lang | --domain | --masq | --email | --password | --name | --up | --down | --bw-mode)
         [[ $# -ge 2 ]] || die "$(t missing_val "$1")"
         case $1 in
@@ -1494,8 +1606,10 @@ main() {
     choose_language
   fi
   load_state
+  adopt_installation
   case $CMD in
     menu) main_menu ;;
+    self-update) if ((ASSUME_YES)); then self_update --yes; else self_update; fi ;;
     install) do_install ;;
     link) show_share ;;
     status) show_status ;;
