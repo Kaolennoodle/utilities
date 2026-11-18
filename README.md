@@ -5,23 +5,24 @@
 - **[hy2.sh](#hy2sh)**：Hysteria2 一键安装与管理，提供中/英文菜单、证书和分享链接。
 
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh -o hy2.sh && bash hy2.sh --lang zh
+  curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh | bash -s -- --lang zh
   ```
 
 - **[ssh-manager.sh](#ssh-managersh)**：交互式管理 SSH 公钥和 sshd 登录配置，支持 Linux/macOS。
 
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/ssh-manager.sh -o ssh-manager.sh && sudo bash ssh-manager.sh
+  curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/ssh-manager.sh | sudo bash
   ```
 
 ---
 
 ## hy2.sh
 
-[scripts/hy2.sh](scripts/hy2.sh) 为原样收录的 v1.1.0 脚本，面向 Ubuntu 26.04，以 root 运行。提供交互菜单、官方核心安装、内置 ACME 证书申请、伪装站点配置、分享链接/二维码、客户端配置及更新/卸载功能。
+[scripts/hy2.sh](scripts/hy2.sh) 基于 v1.1.0 修改（当前 v1.1.1，适配管道运行），面向 Ubuntu 26.04，以 root 运行。提供交互菜单、官方核心安装、内置 ACME 证书申请、伪装站点配置、分享链接/二维码、客户端配置及更新/卸载功能。
 
-- 脚本通过终端读取交互输入；先保存再运行，也便于安装 `hy2` 快捷命令。安装完成后可用 `hy2` 再次打开菜单。
-- 去掉 `--lang zh` 会先询问界面语言；`bash hy2.sh --help` 查看全部参数（含非交互安装 `install --domain ... --masq ...`）。
+- 管道运行时，菜单从当前终端读取输入；参数放在 `bash -s --` 之后。安装时自动从本仓库 `main` 分支下载脚本作为 `hy2` 快捷命令，之后可用 `hy2` 再次打开菜单。
+- 去掉 `--lang zh` 会先询问界面语言；加 `--help` 查看全部参数（含非交互安装 `install --domain ... --masq ... --yes`，无终端环境如 cloud-init 也可用）。
+- 也可以先下载再运行：`curl -fsSL <URL> -o hy2.sh && bash hy2.sh --lang zh`。
 
 已完成 Bash 语法检查；未在服务器执行安装或验证部署。
 
@@ -31,9 +32,10 @@
 
 **运行权限**
 
-- `sudo bash ssh-manager.sh`：可管理所有用户的公钥并修改 sshd 配置，默认目标用户为执行 sudo 的用户。已是 root 时直接 `bash ssh-manager.sh`。
-- `bash ssh-manager.sh`（普通用户）：只能管理自己的 `~/.ssh/authorized_keys`。
-- 不支持 `curl ... | bash` 管道运行，因为脚本需从终端读取菜单输入，请按上面的命令先下载再运行。
+- `curl ... | sudo bash`：可管理所有用户的公钥并修改 sshd 配置，默认目标用户为执行 sudo 的用户。已是 root（或系统未安装 sudo）时去掉 `sudo`。
+- `curl ... | bash`（普通用户）：只能管理自己的 `~/.ssh/authorized_keys`。
+- 管道运行时菜单从当前终端读取输入，因此需要在交互式终端中执行；没有终端时脚本会报错退出。
+- 也可以先下载再运行：`curl -fsSL <URL> -o ssh-manager.sh && sudo bash ssh-manager.sh`。
 
 **公钥管理**
 
@@ -69,3 +71,4 @@
 - 仓库公开，服务器无需登录 GitHub 即可下载；不包含私钥、访问令牌或服务器地址。
 - 上述命令使用 `main` 分支，内容会随仓库更新而变化。长期使用时，建议把 URL 中的 `main` 换成你审查过的完整提交 SHA 以固定版本。
 - 新增脚本放在 `scripts/` 目录，并在开头列表添加单行介绍和一键命令，在正文添加详细介绍。
+- 交互式脚本需支持 `curl ... | bash`：全部代码写在函数中、最后一行调用 `main`；脚本来自标准输入时（`BASH_SOURCE[0]` 为空）用 `main "$@" </dev/tty` 从终端读取输入；不要依赖 `$0` 定位脚本自身。

@@ -8,6 +8,7 @@
 #             share link / QR code / client snippets, EN / 中文 UI.
 #
 # Usage:
+#   curl -fsSL <raw-url>/hy2.sh | bash -s -- --lang zh    run via pipe
 #   bash hy2.sh                      interactive menu (asks for language first)
 #   bash hy2.sh --lang zh            interactive menu in Chinese
 #   bash hy2.sh install --domain hy.example.com --masq https://www.example.com \
@@ -16,10 +17,14 @@
 #   hy2 link | status | update | uninstall
 #
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 # Optional: raw URL of this script, used to install the 'hy2' shortcut when the
-# script is executed through a pipe (e.g. bash <(curl ...)).
-SCRIPT_URL=""
+# script is executed through a pipe (e.g. curl ... | bash, bash <(curl ...)).
+SCRIPT_URL="https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh"
+# 1 when the script itself is read from stdin (curl ... | bash); $0 is then the
+# shell (e.g. /bin/bash), not this script.
+FROM_PIPE=0
+[[ -z ${BASH_SOURCE[0]:-} ]] && FROM_PIPE=1
 
 HY_BIN=/usr/local/bin/hysteria
 HY_DIR=/etc/hysteria
@@ -50,7 +55,7 @@ PUB_IP4="" PUB_IP6="" IPS_DETECTED="" LAST_BACKUP_TS=""
 declare -A M_EN M_ZH
 
 M_EN=(
-  [need_root]="This script must be run as root (try: sudo bash %s)."
+  [need_root]="This script must be run as root (try: %s)."
   [no_systemd]="systemd is required but was not found."
   [os_unsupported]="Unsupported OS: %s. This script targets Ubuntu 26.04 LTS."
   [os_untested]="Detected %s. This script is designed for Ubuntu 26.04 LTS; continuing anyway."
@@ -195,7 +200,7 @@ M_EN=(
 )
 
 M_ZH=(
-  [need_root]="请使用 root 权限运行此脚本（例如：sudo bash %s）。"
+  [need_root]="请使用 root 权限运行此脚本（例如：%s）。"
   [no_systemd]="未检测到 systemd，本脚本依赖 systemd。"
   [os_unsupported]="不支持的系统：%s。本脚本面向 Ubuntu 26.04 LTS。"
   [os_untested]="检测到 %s。本脚本按 Ubuntu 26.04 LTS 设计，将继续执行。"
@@ -494,7 +499,12 @@ load_state() {
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
-require_root() { [[ $EUID -eq 0 ]] || die "$(t need_root "$0")"; }
+require_root() {
+  [[ $EUID -eq 0 ]] && return 0
+  local hint="sudo bash $0"
+  ((FROM_PIPE)) || [[ ! -f $0 ]] && hint="curl -fsSL $SCRIPT_URL | sudo bash"
+  die "$(t need_root "$hint")"
+}
 
 check_os() {
   if [[ ! -d /run/systemd/system ]] || ! command -v systemctl >/dev/null; then die "$(t no_systemd)"; fi
@@ -819,8 +829,8 @@ sync_firewall() {
 }
 
 install_shortcut() {
-  local src
-  src=$(readlink -f "$0" 2>/dev/null)
+  local src=""
+  ((FROM_PIPE)) || src=$(readlink -f "$0" 2>/dev/null)
   if [[ -f $src && $src != "$SHORTCUT" ]]; then
     install -m 755 "$src" "$SHORTCUT" && info "$(t shortcut_ok "$SHORTCUT")"
   elif [[ $src == "$SHORTCUT" ]]; then
@@ -1294,4 +1304,11 @@ main() {
   esac
 }
 
-main "$@"
+# When the script itself arrives on stdin (curl ... | bash), stdin is the pipe:
+# read prompts from the terminal instead. Without a terminal (e.g. cloud-init),
+# keep stdin so non-interactive "install ... --yes" still works.
+if [[ -z ${BASH_SOURCE[0]:-} && ! -t 0 ]] && { : </dev/tty; } 2>/dev/null; then
+  main "$@" </dev/tty
+else
+  main "$@"
+fi

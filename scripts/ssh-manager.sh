@@ -27,7 +27,7 @@ err()     { printf '%s\n' "${R}✘${N} $*" >&2; }
 pause()   { printf '\n%s' "${D}按回车继续...${N}"; read -r _; }
 confirm() { local a; printf '%s [y/N]: ' "$1"; read -r a; [[ $a =~ ^[Yy]$ ]]; }
 is_root() { [ "$(id -u)" -eq 0 ]; }
-need_root() { is_root && return 0; err "此操作需要 root 权限，请使用 sudo $0 运行"; return 1; }
+need_root() { is_root && return 0; err "此操作需要 root 权限，请用 sudo 重新运行本脚本"; return 1; }
 
 # ---------------------------------------------------------------- 公钥管理
 
@@ -363,4 +363,11 @@ main() {
   done
 }
 
-[[ ${BASH_SOURCE[0]} == "$0" ]] && main "$@"
+# 支持 bash ssh-manager.sh、bash <(curl ...)、curl ... | bash；被 source 时不执行
+if [[ -z ${BASH_SOURCE[0]:-} ]]; then
+  # 脚本来自标准输入（管道），菜单改从终端读取
+  { : </dev/tty; } 2>/dev/null || { err "未检测到终端，请在交互式终端中运行"; exit 1; }
+  main "$@" </dev/tty
+elif [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  main "$@"
+fi
