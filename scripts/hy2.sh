@@ -14,10 +14,10 @@
 #   bash hy2.sh install --domain hy.example.com --masq https://www.example.com \
 #        [--email me@example.com] [--password xxx] [--name MyNode] \
 #        [--bw-mode client|limit|bbr] [--up 100] [--down 100] [--yes]
-#   hy2 link | status | update | self-update | uninstall
+#   hy2 link | status | update | self-update | bbr [on|off|status] | uninstall
 #
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.5.0"
 # Oldest installed version this script can take over in place. Installs made by
 # older versions must be uninstalled and installed again.
 MIN_UPGRADE_VERSION="1.3.1"
@@ -38,6 +38,9 @@ HY_DATA=/var/lib/hysteria
 HY_ACME_DIR=$HY_DATA/acme
 HY_SERVICE=hysteria-server.service
 SYSCTL_FILE=/etc/sysctl.d/99-hysteria.conf
+BBR_FILE=/etc/sysctl.d/99-hy2-bbr.conf
+BBR_MODLOAD=/etc/modules-load.d/hy2-bbr.conf
+PROC_NET=/proc/sys/net
 SHORTCUT=/usr/local/bin/hy2
 INSTALLER_URL=https://get.hy2.sh/
 PORT=443
@@ -47,6 +50,7 @@ DOMAIN="" EMAIL="" PASSWORD="" MASQ_URL="" NODE_NAME="" TCP_MASQ="yes" UFW_MANAG
 BW_MODE="" BW_UP=0 BW_DOWN=0   # BW_MODE: client | limit | bbr
 
 # CLI options
+BBR_ACTION=status
 CMD=menu UI_LANG=${HY2_LANG:-en} LANG_SET=${HY2_LANG:+1} ASSUME_YES=0
 OPT_DOMAIN="" OPT_MASQ="" OPT_EMAIL="" OPT_EMAIL_SET="" OPT_PASSWORD="" OPT_NAME=""
 OPT_UP="" OPT_DOWN="" OPT_BW_MODE=""
@@ -186,6 +190,20 @@ M_EN=(
   [reissue_confirm]="Delete the current certificate and request a new one? (Let's Encrypt allows 5 duplicate certificates per week)"
   [logs_hint]="Live logs, press Ctrl+C to return."
   [listening]="Listening sockets"
+  [m_bbr]="Kernel TCP BBR   (current: %s)"
+  [bbr_title]="Kernel TCP congestion control"
+  [bbr_cur]="Current algorithm: %s   queue discipline: %s"
+  [bbr_scope]="Note: this only affects TCP (server -> websites, masquerade site, SSH). Hysteria's own UDP/QUIC traffic uses its own congestion control and is not affected."
+  [bbr_by_us]="Kernel TCP BBR is enabled by this script (%s)."
+  [bbr_by_other]="Kernel TCP BBR is already enabled by another system configuration; this script has not changed it."
+  [bbr_unsupported]="The kernel does not support BBR (tcp_bbr module not available)."
+  [bbr_confirm_on]="Enable kernel TCP BBR (tcp_congestion_control=bbr, default_qdisc=fq)?"
+  [bbr_confirm_off]="Disable kernel TCP BBR and restore the previous setting (%s)?"
+  [bbr_on_ok]="Kernel TCP BBR enabled. Takes effect for new TCP connections; the fq queue applies to interfaces after the next reboot."
+  [bbr_on_fail]="Failed to apply the setting (e.g. containers such as OpenVZ/LXC cannot change it). Nothing was changed."
+  [bbr_off_ok]="Kernel TCP BBR disabled, current algorithm: %s."
+  [bbr_not_ours]="BBR was not enabled by this script, nothing to disable."
+  [bbr_keep]="Also restore the kernel TCP congestion control setting (disable BBR)?"
   [tcpmasq_now]="TCP masquerade listener: %s"
   [on]="on"
   [off]="off"
@@ -365,6 +383,20 @@ M_ZH=(
   [reissue_confirm]="删除当前证书并重新申请？（Let's Encrypt 每周最多签发 5 张相同证书）"
   [logs_hint]="实时日志，按 Ctrl+C 返回。"
   [listening]="监听中的端口"
+  [m_bbr]="内核 TCP BBR   （当前: %s）"
+  [bbr_title]="内核 TCP 拥塞控制"
+  [bbr_cur]="当前算法：%s   队列规则：%s"
+  [bbr_scope]="说明：只影响 TCP 连接（服务器访问网站、伪装站点、SSH 等）。Hysteria 节点本身走 UDP/QUIC，使用自己的拥塞控制，不受此设置影响。"
+  [bbr_by_us]="内核 TCP BBR 已由本脚本开启（%s）。"
+  [bbr_by_other]="内核 TCP BBR 已由系统其他配置开启，本脚本未做改动。"
+  [bbr_unsupported]="当前内核不支持 BBR（无法加载 tcp_bbr 模块）。"
+  [bbr_confirm_on]="开启内核 TCP BBR（tcp_congestion_control=bbr，default_qdisc=fq）？"
+  [bbr_confirm_off]="关闭内核 TCP BBR 并恢复原设置（%s）？"
+  [bbr_on_ok]="已开启内核 TCP BBR。新建的 TCP 连接立即生效；fq 队列规则在下次重启后应用到网卡。"
+  [bbr_on_fail]="设置应用失败（OpenVZ/LXC 等容器通常无法修改），未做任何改动。"
+  [bbr_off_ok]="已关闭内核 TCP BBR，当前算法：%s。"
+  [bbr_not_ours]="BBR 不是由本脚本开启的，无需关闭。"
+  [bbr_keep]="是否同时恢复内核 TCP 拥塞控制设置（关闭 BBR）？"
   [tcpmasq_now]="TCP 伪装监听：%s"
   [on]="开启"
   [off]="关闭"
@@ -954,6 +986,81 @@ EOF
   if sysctl -p "$SYSCTL_FILE" >/dev/null 2>&1; then info "$(t sysctl_done)"; else warn "$(t sysctl_fail)"; fi
 }
 
+# ---- Kernel TCP BBR -------------------------------------------------------
+# Independent of Hysteria (which runs its own congestion control over QUIC):
+# affects TCP only. Settings live in $BBR_FILE; the values in effect before
+# enabling are recorded in it so they can be restored.
+bbr_cc()    { cat "$PROC_NET/ipv4/tcp_congestion_control" 2>/dev/null || echo "-"; }
+bbr_qdisc() { cat "$PROC_NET/core/default_qdisc" 2>/dev/null || echo "-"; }
+bbr_managed() { [[ -f $BBR_FILE ]]; }
+bbr_supported() {
+  grep -qw bbr "$PROC_NET/ipv4/tcp_available_congestion_control" 2>/dev/null && return 0
+  modprobe tcp_bbr >/dev/null 2>&1
+  grep -qw bbr "$PROC_NET/ipv4/tcp_available_congestion_control" 2>/dev/null
+}
+# bbr_prev KEY -> value recorded before enabling (cc | qdisc)
+bbr_prev() { sed -n "s/^# previous_$1=\([A-Za-z0-9_]*\)$/\1/p" "$BBR_FILE" 2>/dev/null | head -n 1; }
+
+
+bbr_status() {
+  title "$(t bbr_title)"
+  echo "$(t bbr_cur "$(bbr_cc)" "$(bbr_qdisc)")"
+  if [[ $(bbr_cc) == bbr ]]; then
+    if bbr_managed; then info "$(t bbr_by_us "$BBR_FILE")"; else info "$(t bbr_by_other)"; fi
+  fi
+  echo "$(t bbr_scope)"
+}
+
+bbr_enable() {
+  local cc qdisc
+  cc=$(bbr_cc) qdisc=$(bbr_qdisc)
+  if [[ $cc == bbr ]]; then bbr_status; return 0; fi
+  bbr_supported || { err "$(t bbr_unsupported)"; return 1; }
+  echo "$(t bbr_scope)"
+  confirm "$(t bbr_confirm_on)" y || { info "$(t aborted)"; return 0; }
+  {
+    echo "# Added by hy2.sh: kernel TCP BBR. Remove via 'hy2 bbr off'."
+    echo "# previous_cc=$cc"
+    echo "# previous_qdisc=$qdisc"
+    echo "net.core.default_qdisc = fq"
+    echo "net.ipv4.tcp_congestion_control = bbr"
+  } >"$BBR_FILE"
+  # Load the module at boot too, so the setting applies early.
+  echo tcp_bbr >"$BBR_MODLOAD"
+  if sysctl -p "$BBR_FILE" >/dev/null 2>&1 && [[ $(bbr_cc) == bbr ]]; then
+    info "$(t bbr_on_ok)"
+  else
+    rm -f "$BBR_FILE" "$BBR_MODLOAD"
+    sysctl -w "net.ipv4.tcp_congestion_control=$cc" "net.core.default_qdisc=$qdisc" >/dev/null 2>&1
+    err "$(t bbr_on_fail)"
+    return 1
+  fi
+}
+
+# bbr_disable [--yes]
+bbr_disable() {
+  local cc qdisc
+  bbr_managed || { info "$(t bbr_not_ours)"; return 0; }
+  cc=$(bbr_prev cc) qdisc=$(bbr_prev qdisc)
+  [[ -z $cc || $cc == bbr ]] && cc=cubic
+  [[ -z $qdisc ]] && qdisc=fq_codel
+  if [[ $1 != --yes ]] && ! confirm "$(t bbr_confirm_off "$cc")" n; then info "$(t aborted)"; return 0; fi
+  rm -f "$BBR_FILE" "$BBR_MODLOAD"
+  sysctl -w "net.ipv4.tcp_congestion_control=$cc" "net.core.default_qdisc=$qdisc" >/dev/null 2>&1
+  # Let any other sysctl configuration take precedence again.
+  sysctl --system >/dev/null 2>&1
+  info "$(t bbr_off_ok "$(bbr_cc)")"
+}
+
+# Menu entry: enable when off, disable when enabled by this script.
+bbr_toggle() {
+  if [[ $(bbr_cc) == bbr ]]; then
+    if bbr_managed; then bbr_status; echo; bbr_disable; else bbr_status; fi
+  else
+    bbr_status; echo; bbr_enable
+  fi
+}
+
 ufw_active() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; }
 
 sync_firewall() {
@@ -1253,6 +1360,7 @@ do_uninstall() {
   rm -f /etc/systemd/system/multi-user.target.wants/hysteria-server@*.service
   userdel hysteria >/dev/null 2>&1
   rm -f "$SYSCTL_FILE"
+  if bbr_managed && ((!ASSUME_YES)) && confirm "$(t bbr_keep)" n; then bbr_disable --yes; fi
   systemctl daemon-reload
   info "$(t uninstall_done)"
   rm -f "$SHORTCUT"
@@ -1271,6 +1379,8 @@ show_status() {
   title "$(t listening)"
   ss -H -ulnp "sport = :$PORT" 2>/dev/null
   ss -H -tlnp "sport = :$PORT" 2>/dev/null
+  echo
+  echo "$(t bbr_cur "$(bbr_cc)" "$(bbr_qdisc)")"
 }
 
 show_logs() {
@@ -1422,6 +1532,7 @@ build_main() {
       menu_item sub menu_modify "$(t m_modify)"
       menu_item sub menu_cert "$(t m_cert)"
       menu_item sub menu_service "$(t m_service)"
+      menu_item act bbr_toggle "$(t m_bbr "$(bbr_cc)")"
       menu_section "$(t m_sec_maint)"
       menu_item act self_update "$(t m_selfupdate)"
       menu_item act do_update "$(t m_update)"
@@ -1550,6 +1661,8 @@ Commands:
   status       Show service status
   update       Update Hysteria2 core
   self-update  Update this management script (keeps the node configuration)
+  bbr [on|off|status]
+               Kernel TCP BBR (TCP only; Hysteria's UDP traffic is unaffected)
   uninstall    Remove Hysteria2
 
 Options:
@@ -1576,6 +1689,10 @@ parse_args() {
   while (($#)); do
     case $1 in
       menu | install | link | status | update | self-update | uninstall) CMD=$1 ;;
+      bbr)
+        CMD=bbr
+        if [[ ${2:-} == on || ${2:-} == off || ${2:-} == status ]]; then BBR_ACTION=$2; shift; fi
+        ;;
       --lang | --domain | --masq | --email | --password | --name | --up | --down | --bw-mode)
         [[ $# -ge 2 ]] || die "$(t missing_val "$1")"
         case $1 in
@@ -1615,6 +1732,14 @@ main() {
     status) show_status ;;
     update) do_update ;;
     uninstall) do_uninstall ;;
+    bbr)
+      require_manageable || exit 1
+      case $BBR_ACTION in
+        on) bbr_enable ;;
+        off) if ((ASSUME_YES)); then bbr_disable --yes; else bbr_disable; fi ;;
+        *) bbr_status ;;
+      esac
+      ;;
   esac
 }
 

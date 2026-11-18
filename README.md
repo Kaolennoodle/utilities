@@ -18,7 +18,7 @@
 
 ## hy2.sh
 
-[scripts/hy2.sh](scripts/hy2.sh) 基于 v1.1.0 修改（当前 v1.4.0），面向 Ubuntu 26.04，以 root 运行。提供交互菜单、官方核心安装、内置 ACME 证书申请、伪装站点配置、节点链接（`hysteria2://`）、内核与脚本更新、卸载功能。
+[scripts/hy2.sh](scripts/hy2.sh) 基于 v1.1.0 修改（当前 v1.5.0），面向 Ubuntu 26.04，以 root 运行。提供交互菜单、官方核心安装、内置 ACME 证书申请、伪装站点配置、节点链接（`hysteria2://`）、内核 TCP BBR 开关、内核与脚本更新、卸载功能。
 
 - 管道运行时，菜单从当前终端读取输入；参数放在 `bash -s --` 之后。安装时自动从本仓库 `main` 分支下载脚本作为 `hy2` 快捷命令，之后可用 `hy2` 再次打开菜单。
 - 菜单按安装状态显示：未安装时只提供安装；已安装时分为常用、配置、维护三组，卸载等危险操作红色显示并放在最后。
@@ -31,6 +31,7 @@
   | 强制 BBR | `ignoreClientBandwidth: true` | 忽略客户端带宽设置，全部使用 BBR |
 
   **服务器与客户端的上传/下载方向相反**：服务器上传 = 客户端下载，服务器下载 = 客户端上传。例如希望客户端下载最多 500 Mbps、上传最多 50 Mbps，应设置服务器上传 500、下载 50。命令行：`install ... --bw-mode limit --up 500 --down 50`（单位 Mbps，也可写 `500m`、`1g`；0 表示该方向不限制）。
+- **内核 TCP BBR**：菜单“内核 TCP BBR”或 `hy2 bbr on|off|status`。开启时写入 `/etc/sysctl.d/99-hy2-bbr.conf`（`default_qdisc=fq`、`tcp_congestion_control=bbr`）并记录原设置，关闭时恢复；内核不支持或容器内无法修改时不做改动。它**只影响 TCP 连接**（服务器访问网站、伪装站点、SSH 等），Hysteria 节点走 UDP/QUIC，使用自己的拥塞控制（上面的带宽模式），不受此设置影响。由系统其他配置开启的 BBR 不会被改动；卸载 Hysteria 时会询问是否一并恢复（默认保留）。
 - 脚本只输出节点链接，不生成二维码或客户端配置文件。节点链接不含带宽；要使用 Brutal，请在客户端填写**本地网络**的实际上传/下载速度，切勿高于实际带宽。
 - 去掉 `--lang zh` 会先询问界面语言；加 `--help` 查看全部参数（含非交互安装 `install --domain ... --masq ... --yes`，无终端环境如 cloud-init 也可用）。
 - 也可以先下载再运行：`curl -fsSL <URL> -o hy2.sh && bash hy2.sh --lang zh`。
