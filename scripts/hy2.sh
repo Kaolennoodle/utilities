@@ -17,7 +17,7 @@
 #   hy2 link | status | update | uninstall
 #
 
-SCRIPT_VERSION="1.3.0"
+SCRIPT_VERSION="1.3.1"
 # Optional: raw URL of this script, used to install the 'hy2' shortcut when the
 # script is executed through a pipe (e.g. curl ... | bash, bash <(curl ...)).
 SCRIPT_URL="https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh"
@@ -74,7 +74,7 @@ M_EN=(
   [dns_aaaa_warn]="The domain has an AAAA record that does not point to this server. Let's Encrypt prefers IPv6, so issuance will likely fail. Remove or fix the AAAA record."
   [continue_anyway]="Continue anyway?"
   [ask_email]="Email for Let's Encrypt (optional, Enter to skip)"
-  [bad_email]="Invalid email address."
+  [bad_email]="Invalid email address (use a plain ASCII address such as me@example.com)."
   [ask_masq]="Your masquerade site URL (e.g. https://www.example.com)"
   [bad_url]="Invalid URL. Spaces, quotes and backslashes are not allowed."
   [masq_loop]="The masquerade site must not use the same domain as this server."
@@ -246,7 +246,7 @@ M_ZH=(
   [dns_aaaa_warn]="域名存在未指向本机的 AAAA 记录。Let's Encrypt 会优先通过 IPv6 验证，证书很可能申请失败，请删除或修正该记录。"
   [continue_anyway]="仍然继续？"
   [ask_email]="Let's Encrypt 通知邮箱（可选，直接回车跳过）"
-  [bad_email]="邮箱格式不正确。"
+  [bad_email]="邮箱格式不正确（请使用常规英文邮箱，如 me@example.com）。"
   [ask_masq]="请输入你的伪装站点 URL（例如 https://www.example.com）"
   [bad_url]="URL 格式不正确，不能包含空格、引号或反斜杠。"
   [masq_loop]="伪装站点不能与本机使用同一个域名。"
@@ -457,7 +457,18 @@ choose_language() {
 # Validation / utilities
 # ---------------------------------------------------------------------------
 valid_domain()   { [[ $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
-valid_email()    { [[ $1 =~ ^[^[:space:]@\"]+@[^[:space:]@\"]+\.[^[:space:]@\"]+$ ]]; }
+# Common ASCII address form; rejects YAML-special leading characters and
+# malformed domains (e.g. "a@b:c.com") that the CA would refuse anyway.
+valid_email() {
+  local re='^[A-Za-z0-9._%+-]+@([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$'
+  [[ $1 =~ $re ]]
+}
+# yaml_str VALUE -> VALUE as a double-quoted YAML scalar.
+yaml_str() {
+  local v=${1//\\/\\\\}
+  v=${v//\"/\\\"}
+  printf '"%s"' "$v"
+}
 valid_password() { [[ $1 =~ ^[A-Za-z0-9._~-]{8,128}$ ]]; }
 # parse_bw "500" | "500 Mbps" | "500m" | "1g" -> Mbps as a plain integer.
 # Leading zeros are dropped (bash would otherwise read "08" as octal).
@@ -879,19 +890,19 @@ write_config() {
     echo "acme:"
     echo "  domains:"
     echo "    - $DOMAIN"
-    [[ -n $EMAIL ]] && echo "  email: $EMAIL"
+    [[ -n $EMAIL ]] && echo "  email: $(yaml_str "$EMAIL")"
     echo "  ca: letsencrypt"
     echo "  dir: $HY_ACME_DIR"
     echo "  type: http"
     echo
     echo "auth:"
     echo "  type: password"
-    echo "  password: \"$PASSWORD\""
+    echo "  password: $(yaml_str "$PASSWORD")"
     echo
     echo "masquerade:"
     echo "  type: proxy"
     echo "  proxy:"
-    echo "    url: \"$MASQ_URL\""
+    echo "    url: $(yaml_str "$MASQ_URL")"
     echo "    rewriteHost: true"
     [[ $TCP_MASQ == yes ]] && echo "  listenHTTPS: :$PORT"
     case $BW_MODE in
