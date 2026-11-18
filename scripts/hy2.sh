@@ -17,7 +17,7 @@
 #   hy2 link | status | update | uninstall
 #
 
-SCRIPT_VERSION="1.1.1"
+SCRIPT_VERSION="1.2.0"
 # Optional: raw URL of this script, used to install the 'hy2' shortcut when the
 # script is executed through a pipe (e.g. curl ... | bash, bash <(curl ...)).
 SCRIPT_URL="https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh"
@@ -145,7 +145,7 @@ M_EN=(
   [no_change]="No change."
   [saved]="Saved."
   [press_enter]="Press Enter to continue..."
-  [invalid_choice]="Invalid choice."
+  [invalid_choice]="Invalid choice"
   [choose]="Please choose"
   [cert_auto]="Certificates are issued and renewed automatically by Hysteria's built-in ACME."
   [cert_not_found]="Certificate file not found yet."
@@ -163,20 +163,26 @@ M_EN=(
   [st_running]="running"
   [st_stopped]="stopped"
   [st_notinst]="not installed"
+  [st_partial]="not managed by this script"
   [lbl_status]="Status"
   [lbl_version]="Core"
   [lbl_autostart]="Autostart"
+  [lbl_endpoint]="Endpoint"
   [m_title]="Hysteria2 Manager"
-  [m_sec_install]="-- Install --"
   [m_install]="Install Hysteria2 (fresh install & configure)"
   [m_update]="Update Hysteria2 core"
   [m_uninstall]="Uninstall Hysteria2"
+  [m_sec_common]="-- Common --"
   [m_sec_config]="-- Configuration --"
+  [m_sec_maint]="-- Maintenance --"
+  [m_reinstall]="Reinstall (overwrites current configuration)"
+  [m_modify_h]="Modify configuration"
+  [m_cert_h]="Certificate"
+  [m_service_h]="Start / Stop / Restart"
   [m_share]="Show share link / QR code / client config"
   [m_showconf]="Show configuration file"
   [m_modify]="Modify configuration  >"
   [m_cert]="Certificate  >"
-  [m_sec_service]="-- Service --"
   [m_service]="Start / Stop / Restart  >"
   [m_status]="Service status"
   [m_logs]="Live logs"
@@ -290,7 +296,7 @@ M_ZH=(
   [no_change]="没有变化。"
   [saved]="已保存。"
   [press_enter]="按回车键继续……"
-  [invalid_choice]="无效选项。"
+  [invalid_choice]="无效选项"
   [choose]="请选择"
   [cert_auto]="证书由 Hysteria 内置 ACME 自动签发和续期。"
   [cert_not_found]="暂未找到证书文件。"
@@ -308,20 +314,26 @@ M_ZH=(
   [st_running]="运行中"
   [st_stopped]="已停止"
   [st_notinst]="未安装"
+  [st_partial]="非本脚本管理"
   [lbl_status]="状态"
   [lbl_version]="内核"
   [lbl_autostart]="开机自启"
+  [lbl_endpoint]="地址"
   [m_title]="Hysteria2 管理脚本"
-  [m_sec_install]="—— 安装 ——"
   [m_install]="安装 Hysteria2（全新安装并配置）"
   [m_update]="更新 Hysteria2 内核"
   [m_uninstall]="卸载 Hysteria2"
+  [m_sec_common]="—— 常用 ——"
   [m_sec_config]="—— 配置 ——"
+  [m_sec_maint]="—— 维护 ——"
+  [m_reinstall]="重新安装（覆盖当前配置）"
+  [m_modify_h]="修改配置"
+  [m_cert_h]="证书管理"
+  [m_service_h]="启动 / 停止 / 重启"
   [m_share]="查看分享链接 / 二维码 / 客户端配置"
   [m_showconf]="查看配置文件"
   [m_modify]="修改配置  ▶"
   [m_cert]="证书管理  ▶"
-  [m_sec_service]="—— 服务 ——"
   [m_service]="启动 / 停止 / 重启  ▶"
   [m_status]="查看运行状态"
   [m_logs]="查看实时日志"
@@ -352,8 +364,9 @@ t() {
   else
     fmt=${M_EN[$key]:-$key}
   fi
+  # "--" keeps formats such as "-- Common --" from being parsed as options.
   # shellcheck disable=SC2059
-  printf "$fmt" "$@"
+  printf -- "$fmt" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -1083,155 +1096,218 @@ reissue_cert() {
 # ---------------------------------------------------------------------------
 # Menus
 # ---------------------------------------------------------------------------
+# Menu engine. Layout and behaviour follow docs/menu-standard.md:
+#   builder function  -> declares items for the current state (menu_item ...)
+#   menu_loop         -> renders, reads one choice, dispatches, repeats
+# Item kinds: act = action (pause afterwards), sub = submenu (no pause),
+#             danger = destructive action (shown in red, pause afterwards).
+MENU_KIND=() MENU_FN=() MENU_TXT=() MENU_MAP=() MENU_MSG=""
+
+menu_begin()   { MENU_KIND=(); MENU_FN=(); MENU_TXT=(); }
+menu_section() { MENU_KIND+=(sec); MENU_FN+=(""); MENU_TXT+=("$1"); }
+menu_item()    { MENU_KIND+=("$1"); MENU_FN+=("$2"); MENU_TXT+=("$3"); }
+
+# managed = installed by this script; partial = core/config present but not
+# manageable (foreign install or leftovers); none = nothing installed.
+install_state() {
+  if is_installed && [[ -f $HY_STATE ]]; then
+    echo managed
+  elif [[ -x $HY_BIN || -d $HY_DIR ]]; then
+    echo partial
+  else
+    echo none
+  fi
+}
+
+toggle_lang() { if [[ $UI_LANG == zh ]]; then UI_LANG=en; else UI_LANG=zh; fi; }
+
+# read_choice VAR - trimmed, lower-cased input; returns 1 on EOF.
+read_choice() {
+  local __c
+  read -rp "$(t choose): " __c || return 1
+  __c=${__c//[[:space:]]/}
+  printf -v "$1" '%s' "${__c,,}"
+}
+
 print_header() {
   local st ver="-" auto="-"
-  if is_installed; then
-    if systemctl is-active --quiet "$HY_SERVICE"; then
-      st="\033[32m● $(t st_running)\033[0m"
-    else
-      st="\033[31m● $(t st_stopped)\033[0m"
-    fi
-    ver=$(core_version)
-    if systemctl is-enabled --quiet "$HY_SERVICE" 2>/dev/null; then auto=$(t yes); else auto=$(t no); fi
-  else
-    st="\033[33m● $(t st_notinst)\033[0m"
-  fi
+  case $(install_state) in
+    managed | partial)
+      if systemctl is-active --quiet "$HY_SERVICE"; then
+        st="\033[32m● $(t st_running)\033[0m"
+      else
+        st="\033[31m● $(t st_stopped)\033[0m"
+      fi
+      ver=$(core_version)
+      if systemctl is-enabled --quiet "$HY_SERVICE" 2>/dev/null; then auto=$(t yes); else auto=$(t no); fi
+      [[ -f $HY_STATE ]] || st+=" \033[33m($(t st_partial))\033[0m"
+      ;;
+    none) st="\033[33m● $(t st_notinst)\033[0m" ;;
+  esac
   echo "=============================================="
   echo "   $(t m_title)  v$SCRIPT_VERSION"
   echo -e "   $(t lbl_status): $st   $(t lbl_version): ${ver:--}   $(t lbl_autostart): $auto"
+  [[ -f $HY_STATE && -n $DOMAIN ]] && echo "   $(t lbl_endpoint): $DOMAIN:$PORT/udp"
   echo "=============================================="
 }
 
-menu_modify() {
-  need_installed || return 1
-  local c old
-  while :; do
-    title "$(t m_modify)"
-    echo "  1. $(t mm_password)"
-    echo "  2. $(t mm_masq)   ($(t current): $MASQ_URL)"
-    echo "  3. $(t mm_domain)   ($(t current): $DOMAIN)"
-    echo "  4. $(t mm_name)   ($(t current): $NODE_NAME)"
-    echo "  5. $(t mm_tcpmasq)   ($(t current): $(on_off "$TCP_MASQ"))"
-    echo "  6. $(t mm_bw)   ($(t current): $(bw_label))"
-    echo "  0. $(t back)"
-    read -rp "$(t choose): " c || return 0
-    case $c in
-      1) collect_password new; apply_change ;;
-      2)
-        old=$MASQ_URL; collect_masq
-        if [[ $MASQ_URL == "$old" ]]; then info "$(t no_change)"; else apply_change; fi ;;
-      3)
-        old=$DOMAIN; collect_domain
-        if [[ $DOMAIN == "$old" ]]; then
-          info "$(t no_change)"
-        else
-          # masquerade site must not point at the new domain
-          [[ $(url_host "$MASQ_URL") == "$DOMAIN" ]] && collect_masq
-          apply_change
-        fi ;;
-      4)
-        old=$NODE_NAME; ask NODE_NAME "$(t ask_name)" "$NODE_NAME"
-        NODE_NAME=${NODE_NAME:-$old}
-        save_state; info "$(t saved)"; show_share ;;
-      5)
-        if [[ $TCP_MASQ == yes ]]; then
-          TCP_MASQ=no
-        else
-          old=$(port_users t "$PORT")
-          if [[ -n $old ]]; then err "$(t port_busy "$PORT" tcp)"; echo "$old"; continue; fi
-          TCP_MASQ=yes
-        fi
-        apply_change && info "$(t tcpmasq_now "$(on_off "$TCP_MASQ")")" ;;
-      6)
-        local old_up=$BW_UP old_down=$BW_DOWN
-        collect_bandwidth
-        if [[ $BW_UP == "$old_up" && $BW_DOWN == "$old_down" ]]; then
-          info "$(t no_change)"
-        else
-          apply_change
-        fi ;;
-      0) return 0 ;;
-      *) warn "$(t invalid_choice)" ;;
+# menu_render HEADING - HEADING is empty for the main menu.
+menu_render() {
+  local i n=0
+  MENU_MAP=()
+  clear
+  print_header
+  [[ -n $1 ]] && echo -e " \033[36m$1\033[0m"
+  for i in "${!MENU_KIND[@]}"; do
+    case ${MENU_KIND[i]} in
+      sec) echo " ${MENU_TXT[i]}" ;;
+      danger) n=$((n + 1)); MENU_MAP[n]=$i; printf '  %2d. \033[31m%s\033[0m\n' "$n" "${MENU_TXT[i]}" ;;
+      *) n=$((n + 1)); MENU_MAP[n]=$i; printf '  %2d. %s\n' "$n" "${MENU_TXT[i]}" ;;
     esac
+  done
+  echo "----------------------------------------------"
+  echo "   L. $(t m_lang)"
+  if [[ -n $1 ]]; then echo "   0. $(t back)"; else echo "   0. $(t m_exit)"; fi
+  echo "=============================================="
+  if [[ -n $MENU_MSG ]]; then warn "$MENU_MSG"; MENU_MSG=""; fi
+}
+
+# menu_loop BUILDER [HEADING] - main menu when HEADING is empty.
+# 0 / q / EOF leaves the menu (exits the script from the main menu).
+menu_loop() {
+  local builder=$1 heading=$2 c idx
+  while :; do
+    "$builder"
+    menu_render "${heading:+$(t "$heading")}"
+    if ! read_choice c; then [[ -z $heading ]] && exit 0; return 0; fi
+    case $c in
+      '') continue ;;
+      0 | q) [[ -z $heading ]] && exit 0; return 0 ;;
+      l) toggle_lang; continue ;;
+    esac
+    idx=""
+    [[ $c =~ ^[1-9][0-9]*$ ]] && idx=${MENU_MAP[c]:-}
+    if [[ -z $idx ]]; then MENU_MSG="$(t invalid_choice): $c"; continue; fi
+    echo
+    if [[ ${MENU_KIND[idx]} == sub ]]; then
+      "${MENU_FN[idx]}" || pause
+    else
+      "${MENU_FN[idx]}"
+      pause
+    fi
   done
 }
 
-menu_cert() {
-  need_installed || return 1
-  local c
-  while :; do
-    title "$(t m_cert)"
-    echo "  1. $(t mc_info)"
-    echo "  2. $(t mc_reissue)"
-    echo "  0. $(t back)"
-    read -rp "$(t choose): " c || return 0
-    case $c in
-      1) show_cert_info ;;
-      2) reissue_cert ;;
-      0) return 0 ;;
-      *) warn "$(t invalid_choice)" ;;
-    esac
-  done
-}
-
-menu_service() {
-  need_installed || return 1
-  local c
-  title "$(t m_service)"
-  echo "  1. $(t ms_start)"
-  echo "  2. $(t ms_stop)"
-  echo "  3. $(t ms_restart)"
-  echo "  0. $(t back)"
-  read -rp "$(t choose): " c || return 0
-  case $c in
-    1 | 3) restart_and_verify ;;
-    2) systemctl stop "$HY_SERVICE" && info "$(t stopped_ok)" ;;
-    0) return 0 ;;
-    *) warn "$(t invalid_choice)" ;;
+# --- main menu --------------------------------------------------------------
+build_main() {
+  menu_begin
+  case $(install_state) in
+    managed)
+      menu_section "$(t m_sec_common)"
+      menu_item act show_share "$(t m_share)"
+      menu_item act show_status "$(t m_status)"
+      menu_item act show_logs "$(t m_logs)"
+      menu_section "$(t m_sec_config)"
+      menu_item sub menu_modify "$(t m_modify)"
+      menu_item sub menu_cert "$(t m_cert)"
+      menu_item sub menu_service "$(t m_service)"
+      menu_item act show_config "$(t m_showconf)"
+      menu_section "$(t m_sec_maint)"
+      menu_item act do_update "$(t m_update)"
+      menu_item danger do_install "$(t m_reinstall)"
+      menu_item danger do_uninstall "$(t m_uninstall)"
+      ;;
+    partial)
+      menu_item act do_install "$(t m_install)"
+      menu_item danger do_uninstall "$(t m_uninstall)"
+      ;;
+    none)
+      menu_item act do_install "$(t m_install)"
+      ;;
   esac
 }
 
-main_menu() {
-  local c
-  while :; do
-    clear
-    print_header
-    echo " $(t m_sec_install)"
-    echo "   1. $(t m_install)"
-    echo "   2. $(t m_update)"
-    echo "   3. $(t m_uninstall)"
-    echo " $(t m_sec_config)"
-    echo "   4. $(t m_share)"
-    echo "   5. $(t m_showconf)"
-    echo "   6. $(t m_modify)"
-    echo "   7. $(t m_cert)"
-    echo " $(t m_sec_service)"
-    echo "   8. $(t m_service)"
-    echo "   9. $(t m_status)"
-    echo "  10. $(t m_logs)"
-    echo "----------------------------------------------"
-    echo "   L. $(t m_lang)"
-    echo "   0. $(t m_exit)"
-    echo "=============================================="
-    read -rp "$(t choose): " c || exit 0
-    case $c in
-      1) do_install ;;
-      2) do_update ;;
-      3) do_uninstall ;;
-      4) show_share ;;
-      5) show_config ;;
-      6) menu_modify ;;
-      7) menu_cert ;;
-      8) menu_service ;;
-      9) show_status ;;
-      10) show_logs ;;
-      [lL]) if [[ $UI_LANG == zh ]]; then UI_LANG=en; else UI_LANG=zh; fi; continue ;;
-      0 | q | Q) exit 0 ;;
-      *) warn "$(t invalid_choice)" ;;
-    esac
-    pause
-  done
+main_menu() { menu_loop build_main; }
+
+# --- modify -----------------------------------------------------------------
+modify_password() { collect_password new; apply_change; }
+
+modify_masq() {
+  local old=$MASQ_URL
+  collect_masq
+  if [[ $MASQ_URL == "$old" ]]; then info "$(t no_change)"; else apply_change; fi
 }
+
+modify_domain() {
+  local old=$DOMAIN
+  collect_domain
+  if [[ $DOMAIN == "$old" ]]; then info "$(t no_change)"; return 0; fi
+  # masquerade site must not point at the new domain
+  [[ $(url_host "$MASQ_URL") == "$DOMAIN" ]] && collect_masq
+  apply_change
+}
+
+modify_name() {
+  local old=$NODE_NAME
+  ask NODE_NAME "$(t ask_name)" "$NODE_NAME"
+  NODE_NAME=${NODE_NAME:-$old}
+  save_state; info "$(t saved)"; show_share
+}
+
+toggle_tcp_masq() {
+  local users
+  if [[ $TCP_MASQ == yes ]]; then
+    TCP_MASQ=no
+  else
+    users=$(port_users t "$PORT")
+    if [[ -n $users ]]; then err "$(t port_busy "$PORT" tcp)"; echo "$users"; return 1; fi
+    TCP_MASQ=yes
+  fi
+  apply_change && info "$(t tcpmasq_now "$(on_off "$TCP_MASQ")")"
+}
+
+modify_bw() {
+  local old_up=$BW_UP old_down=$BW_DOWN
+  collect_bandwidth
+  if [[ $BW_UP == "$old_up" && $BW_DOWN == "$old_down" ]]; then info "$(t no_change)"; else apply_change; fi
+}
+
+build_modify() {
+  menu_begin
+  menu_item act modify_password "$(t mm_password)"
+  menu_item act modify_masq "$(t mm_masq)   ($(t current): $MASQ_URL)"
+  menu_item act modify_domain "$(t mm_domain)   ($(t current): $DOMAIN)"
+  menu_item act modify_name "$(t mm_name)   ($(t current): $NODE_NAME)"
+  menu_item act toggle_tcp_masq "$(t mm_tcpmasq)   ($(t current): $(on_off "$TCP_MASQ"))"
+  menu_item act modify_bw "$(t mm_bw)   ($(t current): $(bw_label))"
+}
+
+menu_modify() { need_installed || return 1; menu_loop build_modify m_modify_h; }
+
+# --- certificate --------------------------------------------------------------
+build_cert() {
+  menu_begin
+  menu_item act show_cert_info "$(t mc_info)"
+  menu_item danger reissue_cert "$(t mc_reissue)"
+}
+
+menu_cert() { need_installed || return 1; menu_loop build_cert m_cert_h; }
+
+# --- service ------------------------------------------------------------------
+service_stop() { systemctl stop "$HY_SERVICE" && info "$(t stopped_ok)"; }
+
+# Only offer what makes sense for the current service state.
+build_service() {
+  menu_begin
+  if systemctl is-active --quiet "$HY_SERVICE"; then
+    menu_item act restart_and_verify "$(t ms_restart)"
+    menu_item act service_stop "$(t ms_stop)"
+  else
+    menu_item act restart_and_verify "$(t ms_start)"
+  fi
+}
+
+menu_service() { need_installed || return 1; menu_loop build_service m_service_h; }
 
 usage() {
   cat <<EOF
