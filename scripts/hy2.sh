@@ -13,11 +13,11 @@
 #   bash hy2.sh --lang zh            interactive menu in Chinese
 #   bash hy2.sh install --domain hy.example.com --masq https://www.example.com \
 #        [--email me@example.com] [--password xxx] [--name MyNode] \
-#        [--up 100] [--down 100] [--yes]
+#        [--bw-mode client|limit|bbr] [--up 100] [--down 100] [--yes]
 #   hy2 link | status | update | uninstall
 #
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 # Optional: raw URL of this script, used to install the 'hy2' shortcut when the
 # script is executed through a pipe (e.g. curl ... | bash, bash <(curl ...)).
 SCRIPT_URL="https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh"
@@ -41,12 +41,12 @@ PORT=443
 
 # Runtime state (persisted in $HY_STATE)
 DOMAIN="" EMAIL="" PASSWORD="" MASQ_URL="" NODE_NAME="" TCP_MASQ="yes" UFW_MANAGED=0
-BW_UP="100" BW_DOWN="100"
+BW_MODE="" BW_UP=0 BW_DOWN=0   # BW_MODE: client | limit | bbr
 
 # CLI options
 CMD=menu UI_LANG=${HY2_LANG:-en} LANG_SET=${HY2_LANG:+1} ASSUME_YES=0
 OPT_DOMAIN="" OPT_MASQ="" OPT_EMAIL="" OPT_EMAIL_SET="" OPT_PASSWORD="" OPT_NAME=""
-OPT_UP="" OPT_DOWN=""
+OPT_UP="" OPT_DOWN="" OPT_BW_MODE=""
 PUB_IP4="" PUB_IP6="" IPS_DETECTED="" LAST_BACKUP_TS=""
 
 # ---------------------------------------------------------------------------
@@ -88,13 +88,34 @@ M_EN=(
   [ask_password_keep]="Proxy password (Enter = keep current)"
   [bad_password]="Password must be 8-128 characters of: letters, digits, . _ ~ -"
   [ask_name]="Node name shown in clients"
-  [ask_bw_up]="Server upload bandwidth in Mbps for Brutal (0 = BBR/unlimited)"
-  [ask_bw_down]="Server download bandwidth in Mbps for Brutal (0 = BBR/unlimited)"
-  [bad_bw]="Bandwidth must be an integer between 0 and 100000 (in Mbps)."
+  [bw_title]="Bandwidth / congestion control"
+  [bw_intro1]="How it works: a client that sets its own bandwidth uses Brutal for that direction;"
+  [bw_intro2]="a client that sets nothing uses BBR. The server can only cap or override this."
+  [bw_opt_client]="Let clients decide, no server limit (recommended)"
+  [bw_opt_limit]="Limit bandwidth per client on the server"
+  [bw_opt_bbr]="Force BBR for all clients (ignore client bandwidth settings)"
+  [bw_choose]="Choose bandwidth mode [1-3]"
+  [bw_dir1]="!! Directions are reversed between server and client:"
+  [bw_dir2]="     server UPLOAD   = data sent to the client   = client DOWNLOAD"
+  [bw_dir3]="     server DOWNLOAD = data sent by the client   = client UPLOAD"
+  [bw_dir4]="   The limit applies to each client separately, and only to clients using Brutal"
+  [bw_dir5]="   (clients that set bandwidth); the lower of client and server value wins."
+  [bw_dir6]="   Clients on BBR are NOT limited. Do not exceed the server's real bandwidth. 0 = no limit."
+  [ask_bw_up]="Server UPLOAD limit = client DOWNLOAD limit (Mbps, 0 = no limit)"
+  [ask_bw_down]="Server DOWNLOAD limit = client UPLOAD limit (Mbps, 0 = no limit)"
+  [bad_bw]="Bandwidth must be an integer from 0 to 100000 Mbps (units like 500m or 1g are accepted)."
+  [bad_bw_mode]="Invalid --bw-mode: %s (use client, limit or bbr)."
+  [bw_limit_none]="Both directions are unlimited, using \"let clients decide\" instead."
   [sum_bw]="Bandwidth / CC"
-  [bw_brutal]="Brutal (up=%s Mbps, down=%s Mbps)"
-  [bw_bbr]="BBR (no bandwidth limit)"
-  [bw_note]="Note: Brutal congestion control requires clients to also configure their up/down bandwidth."
+  [bw_client]="Clients decide (no server limit)"
+  [bw_limit]="Server limit: upload %s (= client download) / download %s (= client upload)"
+  [bw_bbr]="Force BBR (client bandwidth ignored)"
+  [bw_unlimited]="unlimited"
+  [bw_note]="Bandwidth (optional): set YOUR local network's real upload/download speed in the client to use Brutal; leave it out to use BBR. Never set it higher than your real bandwidth. Fields: mihomo up/down, sing-box up_mbps/down_mbps."
+  [bw_note_limit]="Server limit: clients download at most %s and upload at most %s; higher client values are capped."
+  [bw_note_bbr]="The server forces BBR: client bandwidth settings are ignored, no need to set them."
+  [bw_c_up]="optional: your upload speed"
+  [bw_c_down]="optional: your download speed"
   [port_busy]="Port %s/%s is already in use:"
   [port80_required]="TCP 80 is required for certificate issuance (ACME HTTP-01). Free it and try again."
   [udp443_required]="UDP 443 is required by Hysteria2. Free it and try again."
@@ -193,7 +214,7 @@ M_EN=(
   [mm_domain]="Change domain (re-issues certificate)"
   [mm_name]="Change node name"
   [mm_tcpmasq]="Toggle TCP 443 masquerade listener"
-  [mm_bw]="Configure bandwidth / Brutal"
+  [mm_bw]="Bandwidth / congestion control"
   [mc_info]="Show certificate info"
   [mc_reissue]="Force re-issue certificate"
   [ms_start]="Start"
@@ -239,13 +260,34 @@ M_ZH=(
   [ask_password_keep]="代理密码（直接回车保留当前密码）"
   [bad_password]="密码须为 8-128 位，只能包含字母、数字及 . _ ~ -"
   [ask_name]="客户端显示的节点名称"
-  [ask_bw_up]="服务器上传带宽 Mbps，用于启用 Brutal（填 0 则回退 BBR）"
-  [ask_bw_down]="服务器下载带宽 Mbps，用于启用 Brutal（填 0 则回退 BBR）"
-  [bad_bw]="带宽须为 0 到 100000 之间的整数（单位 Mbps）。"
+  [bw_title]="带宽 / 拥塞控制"
+  [bw_intro1]="说明：客户端填写了带宽的方向使用 Brutal，未填写的方向使用 BBR；"
+  [bw_intro2]="服务器只能对其限速或强制改用 BBR，不能替客户端开启 Brutal。"
+  [bw_opt_client]="由客户端决定，服务器不限速（推荐）"
+  [bw_opt_limit]="在服务器端限制每个客户端的带宽"
+  [bw_opt_bbr]="强制所有客户端使用 BBR（忽略客户端带宽设置）"
+  [bw_choose]="请选择带宽模式 [1-3]"
+  [bw_dir1]="!! 服务器与客户端的上传/下载方向相反："
+  [bw_dir2]="     服务器【上传】= 服务器发给客户端的数据 = 客户端【下载】"
+  [bw_dir3]="     服务器【下载】= 客户端发给服务器的数据 = 客户端【上传】"
+  [bw_dir4]="   上限对每个客户端单独生效，且只限制使用 Brutal 的客户端（即填写了带宽的客户端），"
+  [bw_dir5]="   实际速度取客户端设置与服务器上限中较小的值。"
+  [bw_dir6]="   使用 BBR 的客户端不受此限制。请勿超过服务器的实际带宽；填 0 表示该方向不限制。"
+  [ask_bw_up]="服务器【上传】上限 = 客户端【下载】上限（Mbps，0 = 不限）"
+  [ask_bw_down]="服务器【下载】上限 = 客户端【上传】上限（Mbps，0 = 不限）"
+  [bad_bw]="带宽须为 0 到 100000 之间的整数，单位 Mbps（也可写 500m、1g）。"
+  [bad_bw_mode]="无效的 --bw-mode：%s（可选 client、limit、bbr）。"
+  [bw_limit_none]="两个方向都不限制，已改为「由客户端决定」。"
   [sum_bw]="带宽 / 拥塞控制"
-  [bw_brutal]="Brutal（上行 %s Mbps，下行 %s Mbps）"
-  [bw_bbr]="BBR（不限制带宽）"
-  [bw_note]="提示：Brutal 拥塞控制需要客户端同时配置上行/下行带宽才会生效。"
+  [bw_client]="由客户端决定（服务器不限速）"
+  [bw_limit]="服务器限速：上传 %s（= 客户端下载）/ 下载 %s（= 客户端上传）"
+  [bw_bbr]="强制 BBR（忽略客户端带宽设置）"
+  [bw_unlimited]="不限"
+  [bw_note]="带宽（可选）：在客户端填写【你本地网络】的实际上传/下载速度即使用 Brutal，不填则使用 BBR。切勿高于实际带宽，否则会变慢、不稳定。字段：mihomo 为 up/down，sing-box 为 up_mbps/down_mbps。"
+  [bw_note_limit]="服务器已限速：客户端下载最多 %s，上传最多 %s；客户端填写更高的值也会被限制。"
+  [bw_note_bbr]="服务器强制使用 BBR，客户端的带宽设置会被忽略，无需填写。"
+  [bw_c_up]="可选：本机上传速度"
+  [bw_c_down]="可选：本机下载速度"
   [port_busy]="端口 %s/%s 已被占用："
   [port80_required]="申请证书（ACME HTTP-01）需要使用 TCP 80 端口，请释放后重试。"
   [udp443_required]="Hysteria2 需要使用 UDP 443 端口，请释放后重试。"
@@ -344,7 +386,7 @@ M_ZH=(
   [mm_domain]="修改域名（将重新申请证书）"
   [mm_name]="修改节点名称"
   [mm_tcpmasq]="开启 / 关闭 TCP 443 伪装监听"
-  [mm_bw]="配置带宽 / Brutal 拥塞控制"
+  [mm_bw]="带宽 / 拥塞控制"
   [mc_info]="查看证书信息"
   [mc_reissue]="强制重新申请证书"
   [ms_start]="启动"
@@ -417,19 +459,24 @@ choose_language() {
 valid_domain()   { [[ $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
 valid_email()    { [[ $1 =~ ^[^[:space:]@\"]+@[^[:space:]@\"]+\.[^[:space:]@\"]+$ ]]; }
 valid_password() { [[ $1 =~ ^[A-Za-z0-9._~-]{8,128}$ ]]; }
-normalize_bw() {
-  local v=${1//[[:space:]]/}
+# parse_bw "500" | "500 Mbps" | "500m" | "1g" -> Mbps as a plain integer.
+# Leading zeros are dropped (bash would otherwise read "08" as octal).
+parse_bw() {
+  local v=${1//[[:space:]]/} n
   v=${v,,}
-  v=${v%mbps}
-  printf '%s' "$v"
+  [[ $v =~ ^([0-9]{1,6})(m|mb|mbps|g|gb|gbps)?$ ]] || return 1
+  n=$((10#${BASH_REMATCH[1]}))
+  [[ ${BASH_REMATCH[2]} == g* ]] && n=$((n * 1000))
+  ((n <= 100000)) || return 1
+  printf '%s' "$n"
 }
-valid_bw() { [[ $1 =~ ^[0-9]+$ ]] && (($1 >= 0 && $1 <= 100000)); }
+bw_value() { if (($1 > 0)); then printf '%s Mbps' "$1"; else t bw_unlimited; fi; }
 bw_label() {
-  if ((${BW_UP:-0} > 0 || ${BW_DOWN:-0} > 0)); then
-    t bw_brutal "${BW_UP:-0}" "${BW_DOWN:-0}"
-  else
-    t bw_bbr
-  fi
+  case $BW_MODE in
+    limit) t bw_limit "$(bw_value "$BW_UP")" "$(bw_value "$BW_DOWN")" ;;
+    bbr) t bw_bbr ;;
+    *) t bw_client ;;
+  esac
 }
 valid_url() {
   local re='^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[^[:space:]"\\]*)?$'
@@ -492,6 +539,7 @@ save_state() {
       printf 'NODE_NAME=%q\n' "$NODE_NAME"
       printf 'TCP_MASQ=%q\n' "$TCP_MASQ"
       printf 'UFW_MANAGED=%q\n' "$UFW_MANAGED"
+      printf 'BW_MODE=%q\n' "$BW_MODE"
       printf 'BW_UP=%q\n' "$BW_UP"
       printf 'BW_DOWN=%q\n' "$BW_DOWN"
     } >"$HY_STATE"
@@ -503,8 +551,13 @@ load_state() {
   # shellcheck disable=SC1090
   if [[ -f $HY_STATE ]]; then
     . "$HY_STATE"
-    BW_UP=${BW_UP:-0}
-    BW_DOWN=${BW_DOWN:-0}
+    BW_UP=$(parse_bw "${BW_UP:-0}") || BW_UP=0
+    BW_DOWN=$(parse_bw "${BW_DOWN:-0}") || BW_DOWN=0
+    # State written before BW_MODE existed: 0/0 meant ignoreClientBandwidth
+    # (forced BBR), anything else meant server limits.
+    if [[ $BW_MODE != client && $BW_MODE != limit && $BW_MODE != bbr ]]; then
+      if ((BW_UP == 0 && BW_DOWN == 0)); then BW_MODE=bbr; else BW_MODE=limit; fi
+    fi
   fi
   return 0
 }
@@ -702,29 +755,74 @@ collect_name() {
   NODE_NAME=${n:-$def}
 }
 
-collect_bw_side() {
-  local __var=$1 __opt=$2 __prompt=$3 __def=$4 v
-  if [[ -n $__opt ]]; then
-    v=$(normalize_bw "$__opt")
-    valid_bw "$v" || die "$(t bad_bw)"
-  elif ((ASSUME_YES)); then
-    v=$__def
-  else
-    while :; do
-      ask v "$__prompt" "$__def"
-      v=$(normalize_bw "$v")
-      valid_bw "$v" && break
-      err "$(t bad_bw)"
-    done
-  fi
-  printf -v "$__var" '%s' "$v"
+# ask_bw VAR "prompt" [default] - repeat until a valid bandwidth is entered.
+ask_bw() {
+  local __var=$1 __v
+  while :; do
+    ask __v "$2" "$3"
+    __v=$(parse_bw "$__v") && break
+    err "$(t bad_bw)"
+  done
+  printf -v "$__var" '%s' "$__v"
 }
 
+print_bw_directions() {
+  local k
+  for k in bw_dir1 bw_dir2 bw_dir3 bw_dir4 bw_dir5 bw_dir6; do
+    if [[ $k == bw_dir1 ]]; then echo -e "\033[33m$(t $k)\033[0m"; else echo "$(t $k)"; fi
+  done
+}
+
+# Sets BW_MODE / BW_UP / BW_DOWN from --bw-mode/--up/--down, or interactively.
+# With --yes and no options the current values (default: client) are kept.
 collect_bandwidth() {
-  local def_up=${BW_UP:-100} def_down=${BW_DOWN:-100}
-  ((def_up == 0 && def_down == 0)) && [[ $1 == init ]] && { def_up=100; def_down=100; }
-  collect_bw_side BW_UP "$OPT_UP" "$(t ask_bw_up)" "$def_up"
-  collect_bw_side BW_DOWN "$OPT_DOWN" "$(t ask_bw_down)" "$def_down"
+  local mode=${BW_MODE:-client} up=$BW_UP down=$BW_DOWN c def
+  if [[ -n $OPT_BW_MODE$OPT_UP$OPT_DOWN ]]; then
+    up=0 down=0
+    if [[ -n $OPT_UP ]]; then up=$(parse_bw "$OPT_UP") || die "$(t bad_bw)"; fi
+    if [[ -n $OPT_DOWN ]]; then down=$(parse_bw "$OPT_DOWN") || die "$(t bad_bw)"; fi
+    case ${OPT_BW_MODE,,} in
+      client | limit | bbr) mode=${OPT_BW_MODE,,} ;;
+      # --up/--down alone mean server limits; "--up 0 --down 0" keeps its
+      # historical meaning of forced BBR.
+      '') if ((up == 0 && down == 0)); then mode=bbr; else mode=limit; fi ;;
+      *) die "$(t bad_bw_mode "$OPT_BW_MODE")" ;;
+    esac
+  elif ((!ASSUME_YES)); then
+    title "$(t bw_title)"
+    echo "$(t bw_intro1)"
+    echo "$(t bw_intro2)"
+    echo "  1. $(t bw_opt_client)"
+    echo "  2. $(t bw_opt_limit)"
+    echo "  3. $(t bw_opt_bbr)"
+    case $mode in limit) def=2 ;; bbr) def=3 ;; *) def=1 ;; esac
+    while :; do
+      ask c "$(t bw_choose)" "$def"
+      case ${c//[[:space:]]/} in
+        1) mode=client; break ;;
+        2) mode=limit; break ;;
+        3) mode=bbr; break ;;
+        *) err "$(t invalid_choice)" ;;
+      esac
+    done
+    if [[ $mode == limit ]]; then
+      echo
+      print_bw_directions
+      if [[ $BW_MODE == limit ]]; then
+        ask_bw up "$(t ask_bw_up)" "$BW_UP"
+        ask_bw down "$(t ask_bw_down)" "$BW_DOWN"
+      else
+        ask_bw up "$(t ask_bw_up)"
+        ask_bw down "$(t ask_bw_down)"
+      fi
+    fi
+  fi
+  if [[ $mode == limit ]] && ((up == 0 && down == 0)); then
+    info "$(t bw_limit_none)"
+    mode=client
+  fi
+  [[ $mode == limit ]] || { up=0; down=0; }
+  BW_MODE=$mode BW_UP=$up BW_DOWN=$down
 }
 
 print_summary() {
@@ -796,16 +894,21 @@ write_config() {
     echo "    url: \"$MASQ_URL\""
     echo "    rewriteHost: true"
     [[ $TCP_MASQ == yes ]] && echo "  listenHTTPS: :$PORT"
-    if ((${BW_UP:-0} > 0 || ${BW_DOWN:-0} > 0)); then
-      echo
-      echo "bandwidth:"
-      ((${BW_UP:-0} > 0)) && echo "  up: ${BW_UP} mbps"
-      ((${BW_DOWN:-0} > 0)) && echo "  down: ${BW_DOWN} mbps"
-      echo "ignoreClientBandwidth: false"
-    else
-      echo
-      echo "ignoreClientBandwidth: true"
-    fi
+    case $BW_MODE in
+      limit)
+        # Per-client caps. Server "up" = traffic to the client (client download),
+        # server "down" = traffic from the client (client upload). Only Brutal
+        # connections are capped; BBR connections are not affected.
+        echo
+        echo "bandwidth:"
+        ((BW_UP > 0)) && echo "  up: ${BW_UP} mbps"
+        ((BW_DOWN > 0)) && echo "  down: ${BW_DOWN} mbps"
+        ;;
+      bbr)
+        echo
+        echo "ignoreClientBandwidth: true"
+        ;;
+    esac
   } >"$tmp"
   install -m 640 -o root -g "$(hy_group)" "$tmp" "$HY_CONF"
   rm -f "$tmp"
@@ -941,7 +1044,7 @@ do_install() {
   collect_masq
   collect_password keep
   collect_name
-  collect_bandwidth init
+  collect_bandwidth
   print_summary
   confirm "$(t proceed)" y || { info "$(t aborted)"; return 0; }
 
@@ -1017,8 +1120,10 @@ show_share() {
   password: "$PASSWORD"
   sni: $DOMAIN
 EOF
-  ((${BW_UP:-0} > 0)) && echo "  up: \"${BW_UP} Mbps\""
-  ((${BW_DOWN:-0} > 0)) && echo "  down: \"${BW_DOWN} Mbps\""
+  if [[ $BW_MODE != bbr ]]; then
+    echo "  # up: \"30 Mbps\"      # $(t bw_c_up)"
+    echo "  # down: \"200 Mbps\"   # $(t bw_c_down)"
+  fi
   cat <<EOF
   alpn:
     - h3
@@ -1032,10 +1137,6 @@ EOF
   "server": "$DOMAIN",
   "server_port": $PORT,
   "password": "$PASSWORD",
-EOF
-  ((${BW_UP:-0} > 0)) && echo "  \"up_mbps\": ${BW_UP},"
-  ((${BW_DOWN:-0} > 0)) && echo "  \"down_mbps\": ${BW_DOWN},"
-  cat <<EOF
   "tls": {
     "enabled": true,
     "server_name": "$DOMAIN",
@@ -1043,7 +1144,12 @@ EOF
   }
 }
 EOF
-  ((${BW_UP:-0} > 0 || ${BW_DOWN:-0} > 0)) && warn "$(t bw_note)"
+  echo
+  case $BW_MODE in
+    bbr) warn "$(t bw_note_bbr)" ;;
+    limit) warn "$(t bw_note)"; warn "$(t bw_note_limit "$(bw_value "$BW_UP")" "$(bw_value "$BW_DOWN")")" ;;
+    *) warn "$(t bw_note)" ;;
+  esac
 }
 
 show_config() {
@@ -1267,9 +1373,9 @@ toggle_tcp_masq() {
 }
 
 modify_bw() {
-  local old_up=$BW_UP old_down=$BW_DOWN
+  local old="$BW_MODE $BW_UP $BW_DOWN"
   collect_bandwidth
-  if [[ $BW_UP == "$old_up" && $BW_DOWN == "$old_down" ]]; then info "$(t no_change)"; else apply_change; fi
+  if [[ "$BW_MODE $BW_UP $BW_DOWN" == "$old" ]]; then info "$(t no_change)"; else apply_change; fi
 }
 
 build_modify() {
@@ -1330,8 +1436,14 @@ Options:
   --email EMAIL        Email for Let's Encrypt (optional)
   --password PASS      Proxy password (default: random)
   --name NAME          Node name shown in clients
-  --up MBPS            Server upload bandwidth for Brutal (default: 100, 0 = BBR)
-  --down MBPS          Server download bandwidth for Brutal (default: 100, 0 = BBR)
+  --bw-mode MODE       Bandwidth mode (default: client):
+                         client  clients decide, no server limit (recommended)
+                         limit   per-client limits from --up / --down
+                         bbr     force BBR, ignore client bandwidth settings
+  --up MBPS            Server UPLOAD limit = client DOWNLOAD limit (0 = no limit)
+  --down MBPS          Server DOWNLOAD limit = client UPLOAD limit (0 = no limit)
+                       Limits only apply to clients using Brutal. --up/--down
+                       without --bw-mode imply "limit" ("--up 0 --down 0" = bbr).
   -y, --yes            Answer yes to all confirmations
   -h, --help           Show this help
 EOF
@@ -1341,7 +1453,7 @@ parse_args() {
   while (($#)); do
     case $1 in
       menu | install | link | status | update | uninstall) CMD=$1 ;;
-      --lang | --domain | --masq | --email | --password | --name | --up | --down)
+      --lang | --domain | --masq | --email | --password | --name | --up | --down | --bw-mode)
         [[ $# -ge 2 ]] || die "$(t missing_val "$1")"
         case $1 in
           --lang) UI_LANG=$2; LANG_SET=1 ;;
@@ -1352,6 +1464,7 @@ parse_args() {
           --name) OPT_NAME=$2 ;;
           --up) OPT_UP=$2 ;;
           --down) OPT_DOWN=$2 ;;
+          --bw-mode) OPT_BW_MODE=$2 ;;
         esac
         shift ;;
       -y | --yes) ASSUME_YES=1 ;;
