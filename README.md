@@ -29,7 +29,7 @@
 
 ## ssh-manager.sh
 
-[scripts/ssh-manager.sh](scripts/ssh-manager.sh) 是一个菜单式 SSH 管理工具，支持 Linux 和 macOS，兼容 bash 3.2+，不依赖额外组件（需要 OpenSSH 的 `ssh-keygen`；从 GitHub 导入公钥时需要 `curl`）。
+[scripts/ssh-manager.sh](scripts/ssh-manager.sh) 是一个菜单式 SSH 管理工具，支持 Linux 和 macOS，兼容 bash 3.2+，不依赖额外组件（需要 OpenSSH 的 `ssh-keygen`；从 GitHub 导入公钥时需要 `curl`）。当前 v1.1.0。
 
 **运行权限**
 
@@ -37,6 +37,7 @@
 - `curl ... | bash`（普通用户）：只能管理自己的 `~/.ssh/authorized_keys`。
 - 管道运行时菜单从当前终端读取输入，因此需要在交互式终端中执行；没有终端时脚本会报错退出。
 - 也可以先下载再运行：`curl -fsSL <URL> -o ssh-manager.sh && sudo bash ssh-manager.sh`。
+- 菜单按权限和状态显示：普通用户不显示 sshd 配置和切换用户；没有公钥时不显示查看/删除；没有备份时不显示恢复。删除公钥、恢复备份红色显示并放在最后。
 
 **公钥管理**
 
@@ -59,7 +60,7 @@
 
 **注意**
 
-- 脚本**没有自动回滚计时**。修改登录方式或端口后，请保留当前会话，另开终端确认能正常登录后再断开；失败时用菜单 15 恢复备份。
+- 脚本**没有自动回滚计时**。修改登录方式或端口后，请保留当前会话，另开终端确认能正常登录后再断开；失败时用菜单中的“恢复 sshd_config 备份”。
 - `Match` 块内的同名设置不会被改写，仍可能对匹配的连接生效。
 - `AllowUsers`/`DenyUsers`、云防火墙等其他限制不在脚本管理范围内。
 

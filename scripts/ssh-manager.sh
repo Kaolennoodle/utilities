@@ -10,6 +10,7 @@
 # sshd_config.d/*.conf 中的设置；主文件中（Match 块之前）的同名旧配置会被注释掉。
 # 每次修改前自动备份，并用 `sshd -t` 校验，校验失败不会写入。
 
+SCRIPT_VERSION="1.1.0"
 SSHD_CONFIG="${SSHD_CONFIG:-/etc/ssh/sshd_config}"
 SSHD_BIN="$(command -v sshd 2>/dev/null || echo /usr/sbin/sshd)"
 OS="$(uname -s)"
@@ -315,52 +316,105 @@ restore_config() {
 }
 
 # ---------------------------------------------------------------- 主菜单
+# 菜单遵循 docs/menu-standard.md：构建函数按当前状态声明菜单项，menu_loop 负责
+# 渲染、读取、分发。菜单项类型：act 普通操作（执行后暂停）、danger 危险操作
+# （红色显示，执行后暂停）。
 
-menu() {
-  refresh_effective
-  clear 2>/dev/null
-  local cfg_hint=""
-  is_root || cfg_hint=" ${D}(需 sudo 运行)${N}"
+MENU_KIND=() MENU_FN=() MENU_TXT=() MENU_MAP=() MENU_MSG=""
+
+menu_begin()   { MENU_KIND=(); MENU_FN=(); MENU_TXT=(); }
+menu_section() { MENU_KIND+=(sec); MENU_FN+=(""); MENU_TXT+=("$1"); }
+menu_item()    { MENU_KIND+=("$1"); MENU_FN+=("$2"); MENU_TXT+=("$3"); }
+
+has_config_backup() { ls "$SSHD_CONFIG".bak.* >/dev/null 2>&1; }
+
+build_main() {
   load_keys
-  cat <<EOF
-${BOLD}════════════ SSH 管理工具 ════════════${N}
- 目标用户: ${C}$TARGET_USER${N}   已有公钥: ${C}${#KEY_TXT[@]}${N} 个
+  menu_begin
+  menu_section "—— 公钥管理 ——"
+  [ ${#KEY_TXT[@]} -gt 0 ] && menu_item act list_keys "查看公钥"
+  menu_item act add_key_paste  "粘贴添加公钥"
+  menu_item act add_key_file   "从文件添加公钥"
+  menu_item act add_key_github "从 GitHub 导入公钥"
+  menu_item act edit_keys      "用编辑器手动编辑"
+  is_root && menu_item act switch_user "切换目标用户"
 
- ${BOLD}[ 公钥管理 ]${N}
-   1) 查看公钥              5) 删除公钥
-   2) 粘贴添加公钥          6) 用编辑器手动编辑
-   3) 从文件添加公钥        7) 切换目标用户
-   4) 从 GitHub 导入公钥
+  if is_root; then
+    menu_section "—— SSH 服务配置 ——"
+    menu_item act cfg_root_login "Root 登录         （当前: ${Y}$(get_opt PermitRootLogin)${N}）"
+    menu_item act cfg_password   "密码登录          （当前: ${Y}$(get_opt PasswordAuthentication)${N}）"
+    menu_item act cfg_pubkey     "公钥/证书登录     （当前: ${Y}$(get_opt PubkeyAuthentication)${N}）"
+    menu_item act cfg_ca         "CA 证书登录       （当前: ${Y}$(get_opt TrustedUserCAKeys)${N}）"
+    menu_item act cfg_port       "SSH 端口          （当前: ${Y}$(get_opt Port)${N}）"
+    menu_item act show_effective "查看生效配置"
+    menu_item act edit_config    "手动编辑 sshd_config"
+  fi
 
- ${BOLD}[ SSH 服务配置 ]${N}$cfg_hint
-   8) Root 登录         当前: ${Y}$(get_opt PermitRootLogin)${N}
-   9) 密码登录          当前: ${Y}$(get_opt PasswordAuthentication)${N}
-  10) 公钥/证书登录     当前: ${Y}$(get_opt PubkeyAuthentication)${N}
-  11) CA 证书登录       当前: ${Y}$(get_opt TrustedUserCAKeys)${N}
-  12) SSH 端口          当前: ${Y}$(get_opt Port)${N}
-  13) 查看生效配置     14) 手动编辑 sshd_config     15) 恢复配置备份
+  if [ ${#KEY_TXT[@]} -gt 0 ] || { is_root && has_config_backup; }; then
+    menu_section "—— 危险操作 ——"
+    [ ${#KEY_TXT[@]} -gt 0 ] && menu_item danger delete_key "删除公钥"
+    is_root && has_config_backup && menu_item danger restore_config "恢复 sshd_config 备份"
+  fi
+}
 
-   0) 退出
-EOF
+print_header() {
+  local role
+  if is_root; then role="${G}root${N}"; else role="${Y}普通用户${N} ${D}(sudo 运行可管理 sshd 配置)${N}"; fi
+  echo "${BOLD}════════════ SSH 管理工具 v$SCRIPT_VERSION ════════════${N}"
+  echo " 目标用户: ${C}$TARGET_USER${N}   已有公钥: ${C}${#KEY_TXT[@]}${N} 个   权限: $role"
+  echo "${BOLD}═══════════════════════════════════════════${N}"
+}
+
+menu_render() {
+  local i n=0
+  MENU_MAP=()
+  clear 2>/dev/null
+  print_header
+  for i in "${!MENU_KIND[@]}"; do
+    case ${MENU_KIND[i]} in
+      sec) echo " ${BOLD}${MENU_TXT[i]}${N}" ;;
+      danger) n=$((n + 1)); MENU_MAP[n]=$i; printf '  %s%2d.%s %s%s%s\n' "$C" "$n" "$N" "$R" "${MENU_TXT[i]}" "$N" ;;
+      *) n=$((n + 1)); MENU_MAP[n]=$i; printf '  %s%2d.%s %s\n' "$C" "$n" "$N" "${MENU_TXT[i]}" ;;
+    esac
+  done
+  echo "───────────────────────────────────────────"
+  echo "   0. 退出"
+  echo "${BOLD}═══════════════════════════════════════════${N}"
+  if [ -n "$MENU_MSG" ]; then warn "$MENU_MSG"; MENU_MSG=""; fi
+}
+
+# read_choice VAR —— 去掉空白并转小写；EOF 时返回 1
+read_choice() {
+  local __c
+  read -r -p "请选择: " __c || return 1
+  __c=$(printf '%s' "${__c//[[:space:]]/}" | tr 'A-Z' 'a-z')
+  printf -v "$1" '%s' "$__c"
+}
+
+# 0 / q / EOF 退出；空输入直接重绘；无效输入在重绘后提示一次
+menu_loop() {
+  local c idx
+  while true; do
+    refresh_effective
+    build_main
+    menu_render
+    read_choice c || exit 0
+    case $c in
+      '') continue ;;
+      0|q) exit 0 ;;
+    esac
+    idx=""
+    [[ $c =~ ^[1-9][0-9]*$ ]] && idx=${MENU_MAP[c]:-}
+    if [ -z "$idx" ]; then MENU_MSG="无效选项: $c"; continue; fi
+    echo
+    "${MENU_FN[idx]}"
+    pause
+  done
 }
 
 main() {
   command -v ssh-keygen >/dev/null || { err "未找到 ssh-keygen，请先安装 OpenSSH"; exit 1; }
-  local c
-  while true; do
-    menu
-    read -r -p "请选择: " c || exit 0
-    echo
-    case $c in
-      1) list_keys ;;  2) add_key_paste ;;  3) add_key_file ;;  4) add_key_github ;;
-      5) delete_key ;; 6) edit_keys ;;      7) switch_user ;;
-      8) cfg_root_login ;; 9) cfg_password ;; 10) cfg_pubkey ;; 11) cfg_ca ;; 12) cfg_port ;;
-      13) show_effective ;; 14) edit_config ;; 15) restore_config ;;
-      0|q|Q) exit 0 ;;
-      *) continue ;;
-    esac
-    pause
-  done
+  menu_loop
 }
 
 # 支持 bash ssh-manager.sh、bash <(curl ...)、curl ... | bash；被 source 时不执行
