@@ -4,20 +4,20 @@
 #
 # Target    : fresh Ubuntu 26.04 LTS, run as root
 # Features  : official core install, Let's Encrypt cert via Hysteria built-in ACME,
-#             proxy on UDP 443, your own masquerade site, systemd autostart,
-#             node share link, self-update, EN / 中文 UI.
+#             proxy on selectable HTTPS port (default UDP 443), your own masquerade site,
+#             systemd autostart, node share link, self-update, EN / 中文 UI.
 #
 # Usage:
 #   curl -fsSL <raw-url>/hy2.sh | bash -s -- --lang zh    run via pipe
 #   bash hy2.sh                      interactive menu (asks for language first)
 #   bash hy2.sh --lang zh            interactive menu in Chinese
 #   bash hy2.sh install --domain hy.example.com --masq https://www.example.com \
-#        [--email me@example.com] [--password xxx] [--name MyNode] \
+#        [--port 443] [--email me@example.com] [--password xxx] [--name MyNode] \
 #        [--bw-mode client|limit|bbr] [--up 100] [--down 100] [--yes]
 #   hy2 link | status | update | self-update | bbr [on|off|status] | uninstall
 #
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 # Oldest installed version this script can take over in place. Installs made by
 # older versions must be uninstalled and installed again.
 MIN_UPGRADE_VERSION="1.3.1"
@@ -43,16 +43,17 @@ BBR_MODLOAD=/etc/modules-load.d/hy2-bbr.conf
 PROC_NET=/proc/sys/net
 SHORTCUT=/usr/local/bin/hy2
 INSTALLER_URL=https://get.hy2.sh/
+ALLOWED_PORTS=(443 8443 2053 2083 2087 2096)
 PORT=443
 
 # Runtime state (persisted in $HY_STATE)
-DOMAIN="" EMAIL="" PASSWORD="" MASQ_URL="" NODE_NAME="" TCP_MASQ="yes" UFW_MANAGED=0
+DOMAIN="" EMAIL="" PASSWORD="" MASQ_URL="" NODE_NAME="" TCP_MASQ="yes"
 BW_MODE="" BW_UP=0 BW_DOWN=0   # BW_MODE: client | limit | bbr
 
 # CLI options
 BBR_ACTION=status
 CMD=menu UI_LANG=${HY2_LANG:-en} LANG_SET=${HY2_LANG:+1} ASSUME_YES=0
-OPT_DOMAIN="" OPT_MASQ="" OPT_EMAIL="" OPT_EMAIL_SET="" OPT_PASSWORD="" OPT_NAME=""
+OPT_DOMAIN="" OPT_PORT="" OPT_MASQ="" OPT_EMAIL="" OPT_EMAIL_SET="" OPT_PASSWORD="" OPT_NAME=""
 OPT_UP="" OPT_DOWN="" OPT_BW_MODE=""
 PUB_IP4="" PUB_IP6="" IPS_DETECTED="" LAST_BACKUP_TS=""
 INSTALLED_VERSION="" REMOTE_VERSION=""
@@ -119,10 +120,17 @@ M_EN=(
   [bw_limit]="Server limit: upload %s (= client download) / download %s (= client upload)"
   [bw_bbr]="Force BBR (client bandwidth ignored)"
   [bw_unlimited]="unlimited"
+  [port_title]="Listen port (proxy & masquerade)"
+  [port_intro]="Only common HTTPS ports are supported. Proxy (UDP) and masquerade (TCP) share this port."
+  [port_default]="default"
+  [port_choose]="Choose port [1-%s] (or enter port number)"
+  [bad_port]="Invalid port. Allowed HTTPS ports: %s."
   [port_busy]="Port %s/%s is already in use:"
+  [port_retry]="Please choose another port."
   [port80_required]="TCP 80 is required for certificate issuance (ACME HTTP-01). Free it and try again."
-  [udp443_required]="UDP 443 is required by Hysteria2. Free it and try again."
-  [tcp443_busy]="TCP 443 is busy; the TCP masquerade listener will be disabled."
+  [udp_port_required]="UDP %s is required by Hysteria2. Free it or choose another port."
+  [tcp_port_busy]="TCP %s is busy; the TCP masquerade listener cannot use this port."
+  [tcp_port_continue]="Continue with TCP masquerade disabled? (Choose N to pick another port)"
   [summary_title]="Installation summary"
   [sum_domain]="Domain"
   [sum_email]="Email"
@@ -141,9 +149,9 @@ M_EN=(
   [writing_config]="Writing configuration ..."
   [sysctl_done]="UDP buffer tuning applied."
   [sysctl_fail]="Failed to apply sysctl settings (ignored)."
-  [fw_ufw]="ufw is active, allowed: %s"
-  [fw_none]="No active host firewall (ufw) detected, nothing to open."
-  [fw_cloud]="Remember to allow UDP 443 and TCP 80/443 in your cloud provider's security group."
+  [fw_ufw_manual]="ufw is active. This script does not modify ufw rules; please allow these ports manually: %s (e.g. %s)."
+  [fw_ufw_uninstall]="ufw is active. If you previously added rules for Hysteria2 (%s), remove them manually if no longer needed."
+  [fw_cloud]="Remember to allow %s in your cloud provider's security group."
   [starting]="Starting service and requesting certificate (up to 3 minutes) "
   [start_ok]="Hysteria2 is up and running."
   [start_fail]="Hysteria2 failed to start. Recent logs:"
@@ -239,10 +247,11 @@ M_EN=(
   [m_lang]="切换到中文"
   [m_exit]="Exit"
   [mm_password]="Change password"
+  [mm_port]="Change listen port (proxy & masquerade)"
   [mm_masq]="Change masquerade site"
   [mm_domain]="Change domain (re-issues certificate)"
   [mm_name]="Change node name"
-  [mm_tcpmasq]="Toggle TCP 443 masquerade listener"
+  [mm_tcpmasq]="Toggle TCP %s masquerade listener"
   [mm_bw]="Bandwidth / congestion control"
   [mc_info]="Show certificate info"
   [mc_reissue]="Force re-issue certificate"
@@ -312,10 +321,17 @@ M_ZH=(
   [bw_limit]="服务器限速：上传 %s（= 客户端下载）/ 下载 %s（= 客户端上传）"
   [bw_bbr]="强制 BBR（忽略客户端带宽设置）"
   [bw_unlimited]="不限"
+  [port_title]="监听端口（代理与伪装站共用）"
+  [port_intro]="仅支持常见 HTTPS 端口。代理（UDP）与伪装站（TCP）将同步使用所选端口。"
+  [port_default]="默认"
+  [port_choose]="请选择端口 [1-%s]（也可直接输入端口号）"
+  [bad_port]="端口无效，仅支持以下常见 HTTPS 端口：%s。"
   [port_busy]="端口 %s/%s 已被占用："
+  [port_retry]="请重新选择其他端口。"
   [port80_required]="申请证书（ACME HTTP-01）需要使用 TCP 80 端口，请释放后重试。"
-  [udp443_required]="Hysteria2 需要使用 UDP 443 端口，请释放后重试。"
-  [tcp443_busy]="TCP 443 已被占用，将不启用 TCP 伪装监听。"
+  [udp_port_required]="Hysteria2 需要使用 UDP %s 端口，请释放或改选其他端口。"
+  [tcp_port_busy]="TCP %s 已被占用，伪装站无法监听该 TCP 端口。"
+  [tcp_port_continue]="是否关闭 TCP 伪装监听并继续使用此端口？（选 N 可重新选择其他端口）"
   [summary_title]="安装信息确认"
   [sum_domain]="域名"
   [sum_email]="邮箱"
@@ -334,9 +350,9 @@ M_ZH=(
   [writing_config]="正在写入配置文件……"
   [sysctl_done]="已应用 UDP 缓冲区优化。"
   [sysctl_fail]="sysctl 参数应用失败（已忽略）。"
-  [fw_ufw]="检测到 ufw 已启用，已放行：%s"
-  [fw_none]="本机未启用 ufw 防火墙，无需放行。"
-  [fw_cloud]="请记得在云服务商安全组中放行 UDP 443 和 TCP 80/443。"
+  [fw_ufw_manual]="检测到 ufw 已启用，本脚本不会自动修改 ufw 规则，请手动放行：%s（例如：%s）。"
+  [fw_ufw_uninstall]="检测到 ufw 已启用，如之前为 Hysteria2 添加过规则（%s），请按需手动清理。"
+  [fw_cloud]="请记得在云服务商安全组中放行：%s。"
   [starting]="正在启动服务并申请证书（最长约 3 分钟）"
   [start_ok]="Hysteria2 已成功运行。"
   [start_fail]="Hysteria2 启动失败，最近日志如下："
@@ -432,10 +448,11 @@ M_ZH=(
   [m_lang]="Switch to English"
   [m_exit]="退出"
   [mm_password]="修改密码"
+  [mm_port]="修改监听端口（同步修改伪装站端口）"
   [mm_masq]="修改伪装站点"
   [mm_domain]="修改域名（将重新申请证书）"
   [mm_name]="修改节点名称"
-  [mm_tcpmasq]="开启 / 关闭 TCP 443 伪装监听"
+  [mm_tcpmasq]="开启 / 关闭 TCP %s 伪装监听"
   [mm_bw]="带宽 / 拥塞控制"
   [mc_info]="查看证书信息"
   [mc_reissue]="强制重新申请证书"
@@ -507,6 +524,13 @@ choose_language() {
 # Validation / utilities
 # ---------------------------------------------------------------------------
 valid_domain()   { [[ $1 =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]]; }
+valid_port() {
+  local p
+  for p in "${ALLOWED_PORTS[@]}"; do
+    [[ $1 == "$p" ]] && return 0
+  done
+  return 1
+}
 # Common ASCII address form; rejects YAML-special leading characters and
 # malformed domains (e.g. "a@b:c.com") that the CA would refuse anyway.
 valid_email() {
@@ -595,12 +619,12 @@ save_state() {
     {
       printf 'INSTALLED_VERSION=%q\n' "$SCRIPT_VERSION"
       printf 'DOMAIN=%q\n' "$DOMAIN"
+      printf 'PORT=%q\n' "$PORT"
       printf 'EMAIL=%q\n' "$EMAIL"
       printf 'PASSWORD=%q\n' "$PASSWORD"
       printf 'MASQ_URL=%q\n' "$MASQ_URL"
       printf 'NODE_NAME=%q\n' "$NODE_NAME"
       printf 'TCP_MASQ=%q\n' "$TCP_MASQ"
-      printf 'UFW_MANAGED=%q\n' "$UFW_MANAGED"
       printf 'BW_MODE=%q\n' "$BW_MODE"
       printf 'BW_UP=%q\n' "$BW_UP"
       printf 'BW_DOWN=%q\n' "$BW_DOWN"
@@ -611,9 +635,11 @@ save_state() {
 
 load_state() {
   INSTALLED_VERSION=""
+  PORT=443
   if [[ -f $HY_STATE ]]; then
     # shellcheck disable=SC1090
     . "$HY_STATE"
+    [[ ${PORT:-} =~ ^[0-9]+$ ]] || PORT=443
     BW_UP=$(parse_bw "${BW_UP:-0}") || BW_UP=0
     BW_DOWN=$(parse_bw "${BW_DOWN:-0}") || BW_DOWN=0
     # State written before BW_MODE existed: 0/0 meant ignoreClientBandwidth
@@ -721,18 +747,10 @@ check_masquerade() {
 # Listeners on a port, excluding Hysteria itself.  $1 = t|u
 port_users() { ss -H -"$1"lnp "sport = :$2" 2>/dev/null | grep -v '"hysteria"'; }
 
-check_ports() {
+check_port80() {
   local out
-  out=$(port_users u "$PORT")
-  [[ -n $out ]] && { err "$(t port_busy "$PORT" udp)"; echo "$out"; die "$(t udp443_required)"; }
   out=$(port_users t 80)
   [[ -n $out ]] && { err "$(t port_busy 80 tcp)"; echo "$out"; die "$(t port80_required)"; }
-  TCP_MASQ=yes
-  out=$(port_users t "$PORT")
-  if [[ -n $out ]]; then
-    warn "$(t port_busy "$PORT" tcp)"; echo "$out"; warn "$(t tcp443_busy)"
-    TCP_MASQ=no
-  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -749,6 +767,90 @@ collect_domain() {
     if check_domain_dns "$d"; then DOMAIN=$d; return 0; fi
     [[ -n $OPT_DOMAIN ]] && exit 1
     d=""
+  done
+}
+
+# collect_port install|modify
+# Proxy (UDP) and masquerade (TCP) share the selected common HTTPS port.
+collect_port() {
+  local mode=${1:-install} p out c i def=1 tag
+  local -a tags
+  if [[ -n $OPT_PORT ]] || ((ASSUME_YES)); then
+    p=${OPT_PORT:-$PORT}
+    valid_port "$p" || die "$(t bad_port "${ALLOWED_PORTS[*]}")"
+    out=$(port_users u "$p")
+    [[ -n $out ]] && { err "$(t port_busy "$p" udp)"; echo "$out"; die "$(t udp_port_required "$p")"; }
+    if [[ $mode == install || $TCP_MASQ == yes ]]; then
+      out=$(port_users t "$p")
+      if [[ -n $out ]]; then
+        warn "$(t port_busy "$p" tcp)"; echo "$out"; warn "$(t tcp_port_busy "$p")"
+        if confirm "$(t tcp_port_continue "$p")" n; then
+          TCP_MASQ=no
+        else
+          die "$(t aborted)"
+        fi
+      elif [[ $mode == install ]]; then
+        TCP_MASQ=yes
+      fi
+    fi
+    PORT=$p
+    return 0
+  fi
+
+  title "$(t port_title)"
+  printf '%s\n' "$(t port_intro)"
+  for i in "${!ALLOWED_PORTS[@]}"; do
+    p=${ALLOWED_PORTS[i]}
+    [[ $p == "$PORT" ]] && def=$((i + 1))
+    tags=()
+    [[ $p == 443 ]] && tags+=("$(t port_default)")
+    [[ $mode == modify && $p == "$PORT" ]] && tags+=("$(t current)")
+    tag=""
+    if ((${#tags[@]} == 2)); then
+      tag=" (${tags[0]}, ${tags[1]})"
+    elif ((${#tags[@]} == 1)); then
+      tag=" (${tags[0]})"
+    fi
+    printf '  %d. %s%s\n' "$((i + 1))" "$p" "$tag"
+  done
+
+  while :; do
+    ask c "$(t port_choose "${#ALLOWED_PORTS[@]}")" "$def"
+    c=${c//[[:space:]]/}
+    if [[ $c =~ ^[1-9][0-9]*$ ]] && ((c >= 1 && c <= ${#ALLOWED_PORTS[@]})); then
+      p=${ALLOWED_PORTS[c - 1]}
+    elif valid_port "$c"; then
+      p=$c
+    else
+      err "$(t bad_port "${ALLOWED_PORTS[*]}")"
+      continue
+    fi
+
+    [[ $mode == modify && $p == "$PORT" ]] && return 0
+
+    out=$(port_users u "$p")
+    if [[ -n $out ]]; then
+      err "$(t port_busy "$p" udp)"; echo "$out"; warn "$(t port_retry)"
+      continue
+    fi
+
+    if [[ $mode == install || $TCP_MASQ == yes ]]; then
+      out=$(port_users t "$p")
+      if [[ -n $out ]]; then
+        warn "$(t port_busy "$p" tcp)"; echo "$out"; warn "$(t tcp_port_busy "$p")"
+        if confirm "$(t tcp_port_continue "$p")" n; then
+          TCP_MASQ=no
+        else
+          warn "$(t port_retry)"
+          continue
+        fi
+      elif [[ $mode == install ]]; then
+        TCP_MASQ=yes
+      fi
+    fi
+
+    PORT=$p
+    return 0
   done
 }
 
@@ -1063,23 +1165,30 @@ bbr_toggle() {
 
 ufw_active() { command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; }
 
-sync_firewall() {
-  if ufw_active; then
-    local opened="80/tcp $PORT/udp"
-    ufw allow 80/tcp comment 'hysteria2 acme' >/dev/null
-    ufw allow "$PORT/udp" comment 'hysteria2' >/dev/null
-    if [[ $TCP_MASQ == yes ]]; then
-      ufw allow "$PORT/tcp" comment 'hysteria2 masquerade' >/dev/null
-      opened+=" $PORT/tcp"
-    elif ((UFW_MANAGED)); then
-      ufw delete allow "$PORT/tcp" >/dev/null 2>&1
-    fi
-    UFW_MANAGED=1
-    info "$(t fw_ufw "$opened")"
+required_ports_desc() {
+  if [[ $TCP_MASQ == yes ]]; then
+    printf 'UDP %s, TCP 80, TCP %s' "$PORT" "$PORT"
   else
-    info "$(t fw_none)"
+    printf 'UDP %s, TCP 80' "$PORT"
   fi
-  warn "$(t fw_cloud)"
+}
+
+ufw_allow_hint() {
+  if [[ $TCP_MASQ == yes ]]; then
+    printf 'ufw allow 80/tcp && ufw allow %s/udp && ufw allow %s/tcp' "$PORT" "$PORT"
+  else
+    printf 'ufw allow 80/tcp && ufw allow %s/udp' "$PORT"
+  fi
+}
+
+# Never modify ufw rules automatically; only remind the user if ufw is active.
+warn_firewall() {
+  local ports
+  ports=$(required_ports_desc)
+  if ufw_active; then
+    warn "$(t fw_ufw_manual "$ports" "$(ufw_allow_hint)")"
+  fi
+  warn "$(t fw_cloud "$ports")"
 }
 
 # Install this script as /usr/local/bin/hy2. When run through a pipe there is
@@ -1152,17 +1261,19 @@ restore_backup() {
 }
 
 # Write config from current variables, restart, roll back on failure.
+# Pass --firewall when listening ports changed.
 apply_change() {
+  local fw_hint=0
+  [[ ${1:-} == --firewall ]] && fw_hint=1
   backup_config
   write_config
   save_state
-  sync_firewall
   if restart_and_verify; then
+    ((fw_hint)) && warn_firewall
     show_share
     return 0
   fi
   restore_backup "$LAST_BACKUP_TS"
-  sync_firewall >/dev/null
   restart_and_verify >/dev/null
   warn "$(t backup_restored)"
   return 1
@@ -1221,7 +1332,9 @@ legacy_notice() {
 # Take over an installation made by an older (supported) version: record the
 # new version in the state file and refresh the 'hy2' shortcut. The Hysteria
 # config and the service are left untouched, so the node stays the same.
-# Future format migrations go here, keyed on $from.
+# Migrations:
+#   < 1.6.0: PORT was fixed at 443 and not stored in state; load_state defaults
+#            PORT=443 and save_state persists it here.
 adopt_installation() {
   local from
   [[ $(version_state) == current ]] || return 0
@@ -1304,8 +1417,9 @@ do_install() {
     confirm "$(t already_installed)" n || { info "$(t aborted)"; return 0; }
   fi
   install_deps
-  check_ports
+  check_port80
   collect_domain
+  collect_port install
   collect_email
   collect_masq
   collect_password keep
@@ -1319,7 +1433,7 @@ do_install() {
   tune_sysctl
   info "$(t writing_config)"
   write_config
-  sync_firewall
+  warn_firewall
   save_state
   install_shortcut
   if restart_and_verify; then
@@ -1349,10 +1463,8 @@ do_uninstall() {
   confirm "$(t uninstall_confirm)" n || { info "$(t aborted)"; return 0; }
   systemctl disable --now "$HY_SERVICE" >/dev/null 2>&1
   run_official_installer --remove || warn "$(t remove_warn)"
-  if ((UFW_MANAGED)) && ufw_active; then
-    ufw delete allow 80/tcp >/dev/null 2>&1
-    ufw delete allow "$PORT/udp" >/dev/null 2>&1
-    ufw delete allow "$PORT/tcp" >/dev/null 2>&1
+  if ufw_active; then
+    warn "$(t fw_ufw_uninstall "$(required_ports_desc)")"
   fi
   rm -rf "$HY_DIR" "$HY_DATA"
   rm -f "$HY_BIN" /etc/systemd/system/hysteria-server.service /etc/systemd/system/hysteria-server@.service
@@ -1571,6 +1683,20 @@ main_menu() {
 # --- modify -----------------------------------------------------------------
 modify_password() { collect_password new; apply_change; }
 
+modify_port() {
+  local old_port=$PORT old_tcp=$TCP_MASQ
+  collect_port modify
+  if [[ $PORT == "$old_port" && $TCP_MASQ == "$old_tcp" ]]; then
+    info "$(t no_change)"
+    return 0
+  fi
+  if apply_change --firewall; then
+    [[ $TCP_MASQ != "$old_tcp" ]] && info "$(t tcpmasq_now "$(on_off "$TCP_MASQ")")"
+    return 0
+  fi
+  return 1
+}
+
 modify_masq() {
   local old=$MASQ_URL
   collect_masq
@@ -1597,12 +1723,13 @@ toggle_tcp_masq() {
   local users
   if [[ $TCP_MASQ == yes ]]; then
     TCP_MASQ=no
+    apply_change && info "$(t tcpmasq_now "$(on_off "$TCP_MASQ")")"
   else
     users=$(port_users t "$PORT")
     if [[ -n $users ]]; then err "$(t port_busy "$PORT" tcp)"; echo "$users"; return 1; fi
     TCP_MASQ=yes
+    apply_change --firewall && info "$(t tcpmasq_now "$(on_off "$TCP_MASQ")")"
   fi
-  apply_change && info "$(t tcpmasq_now "$(on_off "$TCP_MASQ")")"
 }
 
 modify_bw() {
@@ -1614,10 +1741,11 @@ modify_bw() {
 build_modify() {
   menu_begin
   menu_item act modify_password "$(t mm_password)"
+  menu_item act modify_port "$(t mm_port)   ($(t current): $PORT)"
   menu_item act modify_masq "$(t mm_masq)   ($(t current): $MASQ_URL)"
   menu_item act modify_domain "$(t mm_domain)   ($(t current): $DOMAIN)"
   menu_item act modify_name "$(t mm_name)   ($(t current): $NODE_NAME)"
-  menu_item act toggle_tcp_masq "$(t mm_tcpmasq)   ($(t current): $(on_off "$TCP_MASQ"))"
+  menu_item act toggle_tcp_masq "$(t mm_tcpmasq "$PORT")   ($(t current): $(on_off "$TCP_MASQ"))"
   menu_item act modify_bw "$(t mm_bw)   ($(t current): $(bw_label))"
 }
 
@@ -1668,6 +1796,8 @@ Commands:
 Options:
   --lang en|zh         UI language (default: en, or env HY2_LANG)
   --domain DOMAIN      Domain bound to this server
+  --port PORT          Listen port shared by proxy (UDP) and masquerade (TCP)
+                       Allowed HTTPS ports: ${ALLOWED_PORTS[*]} (default: 443)
   --masq URL           Your masquerade site URL
   --email EMAIL        Email for Let's Encrypt (optional)
   --password PASS      Proxy password (default: random)
@@ -1693,11 +1823,12 @@ parse_args() {
         CMD=bbr
         if [[ ${2:-} == on || ${2:-} == off || ${2:-} == status ]]; then BBR_ACTION=$2; shift; fi
         ;;
-      --lang | --domain | --masq | --email | --password | --name | --up | --down | --bw-mode)
+      --lang | --domain | --port | --masq | --email | --password | --name | --up | --down | --bw-mode)
         [[ $# -ge 2 ]] || die "$(t missing_val "$1")"
         case $1 in
           --lang) UI_LANG=$2; LANG_SET=1 ;;
           --domain) OPT_DOMAIN=$2 ;;
+          --port) OPT_PORT=$2 ;;
           --masq) OPT_MASQ=$2 ;;
           --email) OPT_EMAIL=$2; OPT_EMAIL_SET=1 ;;
           --password) OPT_PASSWORD=$2 ;;
