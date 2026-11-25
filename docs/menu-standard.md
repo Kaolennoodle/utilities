@@ -1,6 +1,6 @@
 # 脚本交互菜单设计标准
 
-本仓库交互式脚本的菜单统一遵循以下约定。参考实现：[hy2.sh](../scripts/hy2.sh) 的 `Menus` 部分（含子菜单、中英文）、[ssh-manager.sh](../scripts/ssh-manager.sh) 的“主菜单”部分（单层菜单、兼容 bash 3.2）。
+本仓库交互式脚本的菜单统一遵循以下约定。参考实现：[nodectl.sh](../scripts/nodectl.sh) 的 `Menus` 部分（含子菜单、中英文）、[ssh-manager.sh](../scripts/ssh-manager.sh) 的“主菜单”部分（单层菜单、兼容 bash 3.2）。
 
 ## 1. 画面结构
 

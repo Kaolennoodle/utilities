@@ -2,10 +2,10 @@
 
 常用服务器脚本集合，每个脚本独立使用，按需一键下载运行。
 
-- **[hy2.sh](#hy2sh)**：Hysteria2 一键安装与管理，提供中/英文菜单、自动证书和节点链接，支持自动更新。
+- **[nodectl.sh](#nodectlsh)**：Hysteria2 与 VLESS-REALITY 统一一键安装与管理（原 `hy2.sh` 升级版），支持双协议共用 443 端口与伪装站、中/英文菜单、自动证书与节点链接，支持自动平滑升级。
 
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/hy2.sh | bash -s -- --lang zh
+  curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/nodectl.sh | bash -s -- --lang zh
   ```
 
 - **[ssh-manager.sh](#ssh-managersh)**：交互式管理 SSH 公钥和 sshd 登录配置，支持 Linux/macOS。
@@ -16,15 +16,19 @@
 
 ---
 
-## hy2.sh
+## nodectl.sh
 
-[scripts/hy2.sh](scripts/hy2.sh) 基于 v1.1.0 修改（当前 v1.6.0），面向 Ubuntu 26.04，以 root 运行。提供交互菜单、官方核心安装、内置 ACME 证书申请、常见 HTTPS 端口选择（代理与伪装站同步）、伪装站点配置、节点链接（`hysteria2://`）、内核 TCP BBR 开关、内核与脚本更新、卸载功能。
+[scripts/nodectl.sh](scripts/nodectl.sh) 由原 `hy2.sh` 演进升级而来（当前 v2.0.0），面向 Ubuntu 26.04 LTS，以 root 运行。支持单独或同时部署 **Hysteria2**（官方 `hysteria` 内核）与 **VLESS + XTLS-Vision + REALITY**（官方 `sing-box` 内核，原生兼容 Mihomo / Clash.Meta 系客户端），提供交互菜单、自动证书管理、443 端口与伪装站点无冲突复用、纯节点分享链接输出、内核 TCP BBR 开关、内核与脚本更新、配置回滚及卸载功能。
 
-- 管道运行时，菜单从当前终端读取输入；参数放在 `bash -s --` 之后。安装时自动从本仓库 `main` 分支下载脚本作为 `hy2` 快捷命令，之后可用 `hy2` 再次打开菜单。
-- 菜单按安装状态显示：未安装时只提供安装；已安装时分为常用、配置、维护三组，卸载等危险操作红色显示并放在最后。
-- **监听端口**：安装时及安装后的「修改配置」中可选择监听端口，仅提供常见 HTTPS 端口（`443` 默认，`8443`、`2053`、`2083`、`2087`、`2096`），代理（UDP）与伪装站（TCP 伪装监听）同步使用所选端口；检测到端口冲突时会提示占用进程并提醒重新选择（TCP 冲突也可选择关闭 TCP 伪装监听继续）。命令行可用 `--port <端口>` 指定。ACME HTTP-01 证书申请仍固定使用 TCP 80。
-- **防火墙（ufw）**：脚本不主动修改 ufw 规则。ufw 未启用时不做任何处理；若检测到 ufw 已启用，会提示需要手动放行的端口和参考命令（同时提醒在云服务商安全组放行对应端口）。
-- 带宽 / 拥塞控制有三种模式，安装时选择，之后可在“修改配置”中更改：
+- **运行方式与快捷指令**：管道运行时菜单从当前终端读取输入，参数放在 `bash -s --` 之后。安装后自动写入 `/usr/local/bin/nodectl` 快捷指令，之后直接输入 `nodectl` 即可打开管理菜单。
+- **部署方案与伪装协同（无需 Nginx）**：
+  1. **Hysteria2 + VLESS 同时部署（推荐）**：Hysteria2 监听公网 `UDP 443`（承载 QUIC 代理与 HTTP/3 伪装）并在 `TCP 80` 自动申请/续期 Let's Encrypt 证书，同时将其 HTTPS 伪装监听自动绑定至本机回环 `127.0.0.1:18443`；VLESS (`sing-box`) 前置监听公网 `TCP 443`，合法客户端进入 `VLESS + XTLS-Vision` 隧道，普通浏览器访问或主动探测流量则通过 REALITY 原样透传给 `127.0.0.1:18443`（返回本机域名的真实证书与反代网页，即使反代源位于 Cloudflare 后方也不会产生 CDN 指纹冲突）。
+  2. **仅部署 Hysteria2**：监听常见 HTTPS 端口（默认 `443`，UDP 代理 + 公网 TCP 伪装站同步监听）。
+  3. **仅部署 VLESS (REALITY)**：免域名、免 80 端口、免证书，自动探测本机公网 IPv4/IPv6，握手回落至外部合规 TLS 1.3 站点（自动校验 TLS 1.3 并对 Cloudflare 等 CDN 目标给出风险提示）。
+- **客户端兼容性**：VLESS 服务端采用官方 `sing-box` 内核，避免新版 Xray 强制 `minClientVer` 与后量子 `X25519MLKEM768` 校验导致 Mihomo 系客户端（Clash Verge Rev、FlClash、OpenClash 等）导入 `vless://` 链接静默断流的问题；支持选择客户端 uTLS 指纹（默认 `chrome`）。
+- **监听端口**：支持常见 HTTPS 端口（`443` 默认，`8443`、`2053`、`2083`、`2087`、`2096`）。双协议单独卸载任意一方时，另一方的监听与伪装会自动平滑恢复或引导切换。
+- **防火墙（ufw）**：脚本不主动修改 ufw 规则；检测到 ufw 已启用时提示需手动放行的端口与命令（同时提醒在云安全组放行）。
+- **Hysteria2 带宽 / 拥塞控制**：
 
   | 模式 | 服务端配置 | 效果 |
   | --- | --- | --- |
@@ -32,22 +36,20 @@
   | 服务器限速 | `bandwidth.up` / `bandwidth.down` | 为**每个客户端**设置上限，只限制使用 Brutal 的客户端，实际取客户端与服务器中较小的值；BBR 客户端不受限 |
   | 强制 BBR | `ignoreClientBandwidth: true` | 忽略客户端带宽设置，全部使用 BBR |
 
-  **服务器与客户端的上传/下载方向相反**：服务器上传 = 客户端下载，服务器下载 = 客户端上传。例如希望客户端下载最多 500 Mbps、上传最多 50 Mbps，应设置服务器上传 500、下载 50。命令行：`install ... --bw-mode limit --up 500 --down 50`（单位 Mbps，也可写 `500m`、`1g`；0 表示该方向不限制）。
-- **内核 TCP BBR**：菜单“内核 TCP BBR”或 `hy2 bbr on|off|status`。开启时写入 `/etc/sysctl.d/99-hy2-bbr.conf`（`default_qdisc=fq`、`tcp_congestion_control=bbr`）并记录原设置，关闭时恢复；内核不支持或容器内无法修改时不做改动。它**只影响 TCP 连接**（服务器访问网站、伪装站点、SSH 等），Hysteria 节点走 UDP/QUIC，使用自己的拥塞控制（上面的带宽模式），不受此设置影响。由系统其他配置开启的 BBR 不会被改动；卸载 Hysteria 时会询问是否一并恢复（默认保留）。
-- 脚本只输出节点链接，不生成二维码或客户端配置文件。节点链接不含带宽；要使用 Brutal，请在客户端填写**本地网络**的实际上传/下载速度，切勿高于实际带宽。
-- 去掉 `--lang zh` 会先询问界面语言；加 `--help` 查看全部参数（含非交互安装 `install --domain ... --port 443 --masq ... --yes`，无终端环境如 cloud-init 也可用）。
-- 也可以先下载再运行：`curl -fsSL <URL> -o hy2.sh && bash hy2.sh --lang zh`。
+  **服务器与客户端的上传/下载方向相反**：服务器上传 = 客户端下载，服务器下载 = 客户端上传。命令行：`install hy2 ... --bw-mode limit --up 500 --down 50`（单位 Mbps，也可写 `500m`、`1g`；0 表示该方向不限制）。
+- **内核 TCP BBR**：菜单「内核 TCP BBR」或 `nodectl bbr on|off|status`。写入 `/etc/sysctl.d/99-nodectl-bbr.conf` 并记录原设置，关闭时恢复。**直接加速 VLESS 节点的 TCP 代理隧道**（强烈建议开启），同时也作用于服务器出站与伪装站 TCP 连接；Hysteria2 走 UDP/QUIC，使用自身的拥塞控制。
+- **纯净节点链接**：脚本只输出标准 `hysteria2://` 与 `vless://` 节点分享链接，不生成二维码或额外客户端配置文件。
+- **命令行与无人值守安装**：加 `--help` 查看全部子命令与参数（如 `nodectl install both --domain hy.example.com --masq https://www.example.com --yes`、`nodectl link`、`nodectl status`、`nodectl changelog`）。
 
-### 版本与更新
+### 版本与从 `hy2.sh` 平滑升级
 
-- **更新脚本**：菜单“更新管理脚本”或 `hy2 self-update`。打开菜单时会检查一次新版本（超时 3 秒，失败跳过；设置 `HY2_NO_UPDATE_CHECK=1` 可关闭），有新版本时提示是否更新。下载的脚本须通过版本号与语法检查才会替换 `hy2`，不会降级。
-- **覆盖升级**：由 **v1.3.1 及以后**安装的服务器，直接运行新版脚本即可接管（v1.3.1 没有自更新功能，需运行一次上面的一键命令；v1.4.0 起也可用 `hy2 self-update`）：只更新安装记录和 `hy2` 快捷命令，**不改动 Hysteria 配置、不重启服务，节点链接保持不变**。
-- **旧版本**：由 v1.3.1 之前的版本安装的服务器无法直接升级。脚本会提示并只允许查看节点链接和卸载；请先完全卸载，再重新安装（如需沿用原密码，先记下节点链接）。
-- **更新的版本**：如果服务器由比当前脚本更新的版本管理，脚本拒绝修改，提示运行最新脚本。
-- 安装记录（`/etc/hysteria/.hy2-script.env`）保存安装版本；`hy2` 快捷命令缺失、过旧或损坏时会自动修复。
-- `MIN_UPGRADE_VERSION`（脚本开头）是可覆盖升级的最低版本。今后修改状态文件或配置格式时，在 `adopt_installation` 中按原版本迁移，保证节点配置不变。
+- **旧版 `hy2.sh` 自动迁移**：已由 `hy2.sh` **v1.3.1 及以后版本**部署的存量服务器，无论运行上方新的 `nodectl.sh` 一键命令、继续运行旧的 [scripts/hy2.sh](scripts/hy2.sh) 一键命令，还是在现有 `hy2` 菜单中触发自更新，都会**自动平滑升级为 `nodectl`**：
+  - 自动迁移节点状态至 `/etc/nodectl/state.env` 并接管原内核 BBR 配置，**不重写现有 Hysteria2 配置、不重启服务，原有节点链接零中断保持不变**；
+  - 安装新指令 `nodectl`，自动移除旧的 `/usr/local/bin/hy2` 指令，并展示版本升级日志；
+  - 升级后可直接在 `nodectl` 菜单中一键加装 VLESS 节点并与现有 Hysteria2 共用 443 端口及伪装站。
+- **自更新与版本保护**：菜单「更新管理脚本」或 `nodectl self-update`。打开菜单时检查一次新版本（超时 3 秒；设置 `NODECTL_NO_UPDATE_CHECK=1` 可关闭）。过旧版本（`< v1.3.1`）仅允许查看链接与卸载；若服务器由更高版本脚本管理，旧脚本拒绝修改以防配置损坏。
 
-已在本地通过 Bash 语法检查、ShellCheck 及升级场景模拟；未在服务器执行安装或验证部署。
+已在本地通过 Bash 语法检查、ShellCheck 及旧版迁移/双协议联动场景模拟；未在真实服务器执行安装或验证部署。
 
 ## ssh-manager.sh
 
