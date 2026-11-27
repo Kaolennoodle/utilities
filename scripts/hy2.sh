@@ -8,7 +8,7 @@
 # nodectl.sh.
 #
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 NODECTL_URL="https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/nodectl.sh"
 NODECTL_SHORTCUT=/usr/local/bin/nodectl
 LEGACY_HY2_SHORTCUT=/usr/local/bin/hy2

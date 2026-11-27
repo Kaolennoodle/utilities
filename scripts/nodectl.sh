@@ -1,24 +1,27 @@
 #!/usr/bin/env bash
 #
-# nodectl.sh - Hysteria2 & VLESS-REALITY unified installer & manager
+# nodectl.sh - Hysteria2, VLESS-REALITY & SS-2022 Landing node manager
 #
 # Target    : Ubuntu 26.04 LTS, run as root
 # Cores     : official Hysteria2 core (UDP/QUIC + built-in ACME & HTTPS proxy)
-#             official sing-box core  (VLESS + XTLS-Vision + REALITY, Mihomo-ready)
+#             official sing-box core  (VLESS + XTLS-Vision + REALITY, Shadowsocks-2022)
 # Features  : single or dual protocol deployment, shared port 443 (UDP HY2 + TCP VLESS)
-#             with zero-Nginx loopback masquerade reuse, automatic seamless migration
-#             from hy2.sh (>= v1.3.1), node share links, BBR, rollback, EN / 中文 UI.
+#             with zero-Nginx loopback masquerade reuse, Shadowsocks-2022 landing server
+#             mode & unified relay outbound chaining, automatic migration from hy2.sh,
+#             node share links, BBR, rollback, EN / 中文 UI.
 #
 # Usage:
 #   curl -fsSL <raw-url>/nodectl.sh | bash -s -- --lang zh
 #   bash nodectl.sh                                interactive menu
-#   bash nodectl.sh install both --domain hy.example.com --masq https://www.example.com --yes
-#   bash nodectl.sh install hy2  --domain hy.example.com --masq https://www.example.com --yes
-#   bash nodectl.sh install vless --sni www.apple.com --yes
+#   bash nodectl.sh install both    --domain hy.example.com --masq https://www.example.com --yes
+#   bash nodectl.sh install hy2     --domain hy.example.com --masq https://www.example.com --yes
+#   bash nodectl.sh install vless   --sni www.apple.com --yes
+#   bash nodectl.sh install landing [--port 38492] [--yes]
+#   nodectl outbound [set --ss-link ss://... | clear | status]
 #   nodectl link | status | update | self-update | changelog | bbr [on|off|status] | uninstall
 #
 
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.1.0"
 # Oldest installation version (including legacy hy2.sh) this script can adopt in place.
 MIN_UPGRADE_VERSION="1.3.1"
 SCRIPT_URL="https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/nodectl.sh"
@@ -78,20 +81,32 @@ VL_PORT=443 VL_UUID="" VL_PRIVATE_KEY="" VL_PUBLIC_KEY="" VL_SHORT_ID=""
 VL_FP="chrome" VL_MASQ_MODE="external" VL_SNI=""
 VL_ADDR_MODE="auto" VL_CUSTOM_ADDR="" VL_NAME=""
 
+# Persisted state: Landing server inbound (Shadowsocks-2022)
+SS_ENABLED="no"
+SS_PORT=0 SS_METHOD="2022-blake3-aes-128-gcm" SS_PASSWORD=""
+SS_ADDR_MODE="auto" SS_CUSTOM_ADDR="" SS_NAME=""
+
+# Persisted state: Relay outbound to remote SS-2022 landing server
+OUT_ENABLED="no"
+OUT_SERVER="" OUT_PORT=0 OUT_METHOD="2022-blake3-aes-128-gcm" OUT_PASSWORD="" OUT_NAME=""
+HY_SOCKS_PORT=18080
+
 # Runtime / CLI variables
 INSTALLED_VERSION="" REMOTE_VERSION=""
 MIGRATED_FROM="" UPGRADED_NOTICE_SHOWN=0
-CMD=menu TARGET="" BBR_ACTION=status
+CMD=menu TARGET="" BBR_ACTION=status OUT_ACTION=status
 _DEFAULT_LANG=${NODECTL_LANG:-${HY2_LANG:-en}}
 _DEFAULT_LANG_SET=""
 [[ -n ${NODECTL_LANG:-}${HY2_LANG:-} ]] && _DEFAULT_LANG_SET=1
 UI_LANG=$_DEFAULT_LANG LANG_SET=$_DEFAULT_LANG_SET ASSUME_YES=0
 
-OPT_DOMAIN="" OPT_PORT="" OPT_HY_PORT="" OPT_VL_PORT=""
-OPT_MASQ="" OPT_EMAIL="" OPT_EMAIL_SET="" OPT_PASSWORD=""
-OPT_NAME="" OPT_HY_NAME="" OPT_VL_NAME=""
+OPT_DOMAIN="" OPT_PORT="" OPT_HY_PORT="" OPT_VL_PORT="" OPT_SS_PORT=""
+OPT_MASQ="" OPT_EMAIL="" OPT_EMAIL_SET="" OPT_PASSWORD="" OPT_SS_PASSWORD=""
+OPT_NAME="" OPT_HY_NAME="" OPT_VL_NAME="" OPT_SS_NAME=""
 OPT_UP="" OPT_DOWN="" OPT_BW_MODE=""
 OPT_SNI="" OPT_VL_MASQ="" OPT_UUID="" OPT_FP="" OPT_ADDR=""
+OPT_SS_LINK=""
+PARSED_SS_HOST="" PARSED_SS_PORT="" PARSED_SS_METHOD="" PARSED_SS_PASS="" PARSED_SS_NAME=""
 
 PUB_IP4="" PUB_IP6="" IPS_DETECTED="" LAST_BACKUP_TS=""
 
@@ -276,9 +291,9 @@ M_EN=(
   [hy_start_fail]="Hysteria2 failed to start. Recent logs:"
   [hy_start_timeout]="Timed out waiting for Hysteria2. Recent logs:"
   [hy_fail_hints]="Common causes: DNS not pointing here, TCP 80 blocked by security group, Let's Encrypt rate limit."
-  [starting_sb]="Starting VLESS (sing-box) service ..."
-  [sb_start_ok]="VLESS (sing-box) is up and running."
-  [sb_start_fail]="VLESS (sing-box) failed to start. Recent logs:"
+  [starting_sb]="Starting sing-box service ..."
+  [sb_start_ok]="sing-box is up and running."
+  [sb_start_fail]="sing-box failed to start. Recent logs:"
   [install_done]="Installation complete! Run 'nodectl' anytime to open the manager."
   [shortcut_ok]="Command installed: %s"
   [shortcut_skip]="Could not install 'nodectl' shortcut; run the script again later."
@@ -415,6 +430,74 @@ M_EN=(
   [m_keys_h]="VLESS REALITY keys & ShortId"
   [mk_info]="Show PublicKey & ShortId"
   [mk_reset]="Regenerate keypair & ShortId"
+
+  # Landing server (SS-2022) & Relay outbound chaining
+  [im_landing]="Set up this server as a Landing Node (Shadowsocks-2022)"
+  [m_inst_landing]="Set up as Landing Node (Shadowsocks-2022)"
+  [m_ss_mgr]="Landing server (SS-2022) settings  >"
+  [m_ss_mgr_h]="Landing server (Shadowsocks-2022)"
+  [m_out_hub]="Landing / Outbound routing  >"
+  [m_out_hub_h]="Landing & Outbound settings"
+  [out_lbl_direct]="Direct exit (this server)"
+  [out_lbl_relay]="Relay -> %s:%s"
+  [out_lbl_self]="Landing server (TCP+UDP %s)"
+  [lbl_outbound]="Outbound"
+  [ss_port_title]="Shadowsocks-2022 listen port (TCP + UDP)"
+  [ask_ss_port]="Listen port (1024-65535 or 443, Enter = %s)"
+  [bad_ss_port]="Port must be 443 or an integer between 1024 and 65535."
+  [ss_port_required]="TCP/UDP %s is already in use. Free it or choose another port."
+  [ask_ss_pass]="SS-2022 16-byte Base64 key (Enter = random)"
+  [ask_ss_pass_keep]="SS-2022 16-byte Base64 key (Enter = keep current)"
+  [bad_ss_pass]="Invalid SS-2022 key (must be valid Base64 decoding to %s bytes for %s)."
+  [ask_ss_name]="Landing node name"
+  [ss_addr_title]="Landing node connection address"
+  [sum_ss_listen]="SS-2022 listen"
+  [sum_ss_method]="SS-2022 cipher"
+  [sum_ss_pass]="SS-2022 key"
+  [sum_ss_addr]="SS-2022 address"
+  [sum_ss_name]="SS-2022 name"
+  [fw_ss_restrict_hint]="Tip: on a dedicated landing server, consider restricting port %s in your firewall/security group to your relay server IP only (e.g. ufw allow from <RELAY_IP> to any port %s)."
+  [ntp_warn]="Shadowsocks-2022 requires system clock error < 30s, but NTP sync appears inactive. Consider running: timedatectl set-ntp true"
+  [ss_not_installed]="Shadowsocks-2022 landing server is not installed."
+  [already_installed_ss]="Shadowsocks-2022 landing server is already installed. Reinstall and overwrite?"
+  [uninstall_ss_confirm]="Remove Shadowsocks-2022 landing server configuration?"
+  [uninstall_ss_done]="Shadowsocks-2022 landing server has been removed."
+  [m_reinstall_ss]="Reinstall Landing Node (overwrites SS-2022 config)"
+  [m_uninstall_ss]="Uninstall Landing Node (SS-2022)"
+  [mm_ss_pass]="Change SS-2022 key (invalidates existing links)"
+  [mm_ss_port]="Change listen port"
+  [mm_ss_addr]="Change connection address"
+  [mm_ss_name]="Change node name"
+  [m_ss_service_h]="Landing server (sing-box) service"
+  [ml_sb]="sing-box live logs"
+  [ss_conflict_out]="This server currently forwards outbound traffic to a remote landing server. Disable outbound relay first before enabling local landing server mode."
+  [out_conflict_ss]="This server is currently running as an SS-2022 landing server. Remove landing server mode first before setting a remote landing relay."
+  [out_need_proto]="Install Hysteria2 or VLESS first before configuring outbound relay."
+  [out_set_title]="Configure remote SS-2022 landing server"
+  [out_input_mode1]="Paste ss:// link exported by landing server (recommended)"
+  [out_input_mode2]="Enter server, port and key manually"
+  [ask_ss_link]="Paste ss:// link (2022-blake3-*)"
+  [bad_ss_link]="Invalid or unsupported ss:// link. Expected a Shadowsocks-2022 (2022-blake3-*) link."
+  [ask_out_host]="Landing server IP or domain"
+  [ask_out_port]="Landing server port (1-65535)"
+  [bad_any_port]="Port must be between 1 and 65535."
+  [out_self_err]="Remote landing server cannot be this server's own IP/domain."
+  [checking_out]="Testing TCP connectivity to landing server %s:%s ..."
+  [out_reach_ok]="Landing server %s:%s is reachable."
+  [out_reach_fail]="Could not connect to %s:%s over TCP (check landing server status & firewall)."
+  [out_info_title]="Current outbound / landing status"
+  [out_status_direct]="Current mode: Direct exit from this server."
+  [out_lbl_target]="Landing target"
+  [out_lbl_cipher]="Cipher"
+  [out_lbl_bridge]="HY2 local bridge"
+  [out_set_ok]="Outbound relay enabled -> %s:%s (applies to all proxy protocols on this server)."
+  [out_clear_confirm]="Disable landing server relay and restore direct exit from this server?"
+  [out_clear_ok]="Landing server relay disabled; restored direct exit."
+  [mo_set]="Connect to remote Landing Node (SS-2022 outbound)"
+  [mo_change]="Change remote Landing Node"
+  [mo_info]="Show outbound info & test connectivity"
+  [mo_clear]="Disable remote Landing Node (restore direct exit)"
+  [mo_enable_self]="Enable local Landing Server (SS-2022 inbound on this host)"
 )
 
 M_ZH=(
@@ -593,9 +676,9 @@ M_ZH=(
   [hy_start_fail]="Hysteria2 启动失败，最近日志如下："
   [hy_start_timeout]="等待 Hysteria2 启动超时，最近日志如下："
   [hy_fail_hints]="常见原因：域名未解析到本机、安全组未放行 TCP 80、触发 Let's Encrypt 频率限制。"
-  [starting_sb]="正在启动 VLESS (sing-box) 服务……"
-  [sb_start_ok]="VLESS (sing-box) 已成功运行。"
-  [sb_start_fail]="VLESS (sing-box) 启动失败，最近日志如下："
+  [starting_sb]="正在启动 sing-box 服务……"
+  [sb_start_ok]="sing-box 已成功运行。"
+  [sb_start_fail]="sing-box 启动失败，最近日志如下："
   [install_done]="安装完成！之后输入 nodectl 即可随时打开管理菜单。"
   [shortcut_ok]="已安装快捷命令：%s"
   [shortcut_skip]="无法安装 nodectl 快捷命令，请稍后重新运行本脚本。"
@@ -732,6 +815,74 @@ M_ZH=(
   [m_keys_h]="VLESS REALITY 密钥管理"
   [mk_info]="查看公钥与 ShortId"
   [mk_reset]="重新生成密钥对与 ShortId"
+
+  # Landing server (SS-2022) & Relay outbound chaining
+  [im_landing]="将本机设置为落地机（Shadowsocks-2022）"
+  [m_inst_landing]="将本机设置为落地机（Shadowsocks-2022）"
+  [m_ss_mgr]="落地机 (SS-2022) 管理  ▶"
+  [m_ss_mgr_h]="落地机 (Shadowsocks-2022) 管理"
+  [m_out_hub]="落地机 / 出站设置  ▶"
+  [m_out_hub_h]="落地机与出站转发设置"
+  [out_lbl_direct]="本机直出"
+  [out_lbl_relay]="转发至落地机 %s:%s"
+  [out_lbl_self]="本机为落地机 (TCP+UDP %s)"
+  [lbl_outbound]="出站模式"
+  [ss_port_title]="Shadowsocks-2022 监听端口（TCP + UDP）"
+  [ask_ss_port]="监听端口（1024-65535 或 443，直接回车随机使用 %s）"
+  [bad_ss_port]="端口须为 443 或 1024 到 65535 之间的整数。"
+  [ss_port_required]="端口 %s（TCP/UDP）已被占用，请释放或改选其他端口。"
+  [ask_ss_pass]="SS-2022 密钥（16 字节 Base64，直接回车随机生成）"
+  [ask_ss_pass_keep]="SS-2022 密钥（直接回车保留当前密钥）"
+  [bad_ss_pass]="SS-2022 密钥无效（%2\$s 需要解码后恰好为 %1\$s 字节的合法 Base64 字符串）。"
+  [ask_ss_name]="落地机节点名称"
+  [ss_addr_title]="落地机连接地址"
+  [sum_ss_listen]="SS-2022 监听"
+  [sum_ss_method]="加密算法"
+  [sum_ss_pass]="SS-2022 密钥"
+  [sum_ss_addr]="落地机地址"
+  [sum_ss_name]="落地机名称"
+  [fw_ss_restrict_hint]="安全建议：专用落地机建议在防火墙/云安全组中仅允许你的线路机 IP 访问端口 %s（例如：ufw allow from <线路机IP> to any port %s）。"
+  [ntp_warn]="Shadowsocks-2022 要求两端服务器时间误差小于 30 秒，检测到当前未开启 NTP 同步，建议执行：timedatectl set-ntp true"
+  [ss_not_installed]="本机尚未开启 Shadowsocks-2022 落地服务。"
+  [already_installed_ss]="Shadowsocks-2022 落地服务已开启，是否重新配置并覆盖？"
+  [uninstall_ss_confirm]="是否移除本机的 Shadowsocks-2022 落地机配置？"
+  [uninstall_ss_done]="Shadowsocks-2022 落地服务已卸载。"
+  [m_reinstall_ss]="重新安装落地机（覆盖当前 SS-2022 配置）"
+  [m_uninstall_ss]="卸载落地机 (SS-2022)"
+  [mm_ss_pass]="修改 / 重置 SS-2022 密钥（原链接将失效）"
+  [mm_ss_port]="修改监听端口"
+  [mm_ss_addr]="修改连接地址"
+  [mm_ss_name]="修改节点名称"
+  [m_ss_service_h]="落地机 (sing-box) 服务控制"
+  [ml_sb]="sing-box 实时日志"
+  [ss_conflict_out]="本机当前已开启「转发至远端落地机」，请先关闭远端落地转发后再将本机设为落地机。"
+  [out_conflict_ss]="本机当前已启用「SS-2022 落地服务端」，如需将本机改为转发至其他落地机，请先卸载本机落地服务。"
+  [out_need_proto]="请先安装 Hysteria2 或 VLESS 节点，再配置出站落地转发。"
+  [out_set_title]="配置远端 Shadowsocks-2022 落地机"
+  [out_input_mode1]="直接粘贴落地机生成的 ss:// 链接（推荐）"
+  [out_input_mode2]="手动输入落地机地址、端口与密钥"
+  [ask_ss_link]="请粘贴 ss:// 链接（需为 2022-blake3-* 协议）"
+  [bad_ss_link]="ss:// 链接格式无效或加密算法不受支持（需为 2022-blake3-* 系列）。"
+  [ask_out_host]="落地机 IP 或域名"
+  [ask_out_port]="落地机端口（1-65535）"
+  [bad_any_port]="端口须为 1 到 65535 之间的整数。"
+  [out_self_err]="远端落地机地址不能指向本机自身 IP 或域名。"
+  [checking_out]="正在测试到落地机 %s:%s 的 TCP 连通性……"
+  [out_reach_ok]="落地机 %s:%s 连通性测试通过。"
+  [out_reach_fail]="无法通过 TCP 连接落地机 %s:%s（请检查落地机服务状态及安全组/防火墙）。"
+  [out_info_title]="当前出站与落地机状态"
+  [out_status_direct]="当前出站模式：本机直接出站（未启用落地机转发）。"
+  [out_lbl_target]="远端落地机"
+  [out_lbl_cipher]="加密算法"
+  [out_lbl_bridge]="HY2 本地桥接"
+  [out_set_ok]="已启用落地机转发 -> %s:%s（本机所有代理协议流量均通过落地机出站，域名由落地机解析）。"
+  [out_clear_confirm]="确认关闭落地机转发并恢复本机直接出站？"
+  [out_clear_ok]="已关闭落地机转发，恢复本机直接出站。"
+  [mo_set]="连接远端落地机（配置 SS-2022 出站转发）"
+  [mo_change]="更换远端落地机配置"
+  [mo_info]="查看当前落地机信息与连通性测试"
+  [mo_clear]="关闭远端落地机转发（恢复本机直出）"
+  [mo_enable_self]="将本机开启为落地机（部署 SS-2022 入站服务）"
 )
 
 t() {
@@ -792,28 +943,42 @@ show_changelog() {
   if [[ $UI_LANG == zh ]]; then
     if [[ -n $from ]]; then
       printf '  \033[33m★ 升级说明（v%s -> v%s）\033[0m\n' "$from" "$SCRIPT_VERSION"
-      echo "  - 脚本已更名为 nodectl.sh，快捷呼出指令变更为：nodectl"
-      echo "  - 旧版 /usr/local/bin/hy2 指令已移除，原有 Hysteria2 节点配置与链接保持不变"
+      if ver_lt "$from" "2.0.0"; then
+        echo "  - 脚本已更名为 nodectl.sh，快捷呼出指令变更为：nodectl"
+        echo "  - 旧版 /usr/local/bin/hy2 指令已移除，原有 Hysteria2 节点配置与链接保持不变"
+      else
+        echo "  - 管理脚本已完成平滑更新，现有节点配置与分享链接保持不变"
+      fi
       echo
     fi
+    echo "  v2.1.0 更新内容："
+    echo "  1. 新增落地机模式：支持将服务器一键设置为 Shadowsocks-2022 (2022-blake3-aes-128-gcm) 落地机并导出 ss:// 链接"
+    echo "  2. 新增统一出站转发：线路机支持粘贴落地机 ss:// 链接一键接管全局出站（Hysteria2 与 VLESS 共享同一落地出口，域名远端解析零泄漏）"
+    echo
     echo "  v2.0.0 更新内容："
     echo "  1. 架构升级：由单一 Hysteria2 脚本升级为 Hysteria2 + VLESS 多协议统一管理脚本（nodectl）"
     echo "  2. 新增 VLESS 节点：采用 sing-box 内核部署 VLESS + XTLS-Vision + REALITY，完美兼容 Mihomo 系客户端"
-    echo "  3. 共用 443 与伪装站：支持 UDP 443 (Hysteria2) + TCP 443 (VLESS) 无缝共存，无需 Nginx 前置，"
-    echo "     由 REALITY 自动将非代理探测流量透传至 Hysteria2 本地回环伪装服务（复用本机真证书与反代站点）"
+    echo "  3. 共用 443 与伪装站：支持 UDP 443 (Hysteria2) + TCP 443 (VLESS) 无缝共存，无需 Nginx 前置"
     echo "  4. 平滑接管：自动迁移旧版 hy2.sh（>= v1.3.1）配置与内核 TCP BBR 状态，零中断保留现有节点"
   else
     if [[ -n $from ]]; then
       printf '  \033[33m* Upgrade Notice (v%s -> v%s)\033[0m\n' "$from" "$SCRIPT_VERSION"
-      echo "  - The script has been renamed to nodectl.sh; the new shortcut command is: nodectl"
-      echo "  - Legacy '/usr/local/bin/hy2' was removed; your existing Hysteria2 node and link remain unchanged"
+      if ver_lt "$from" "2.0.0"; then
+        echo "  - The script has been renamed to nodectl.sh; the new shortcut command is: nodectl"
+        echo "  - Legacy '/usr/local/bin/hy2' was removed; your existing Hysteria2 node and link remain unchanged"
+      else
+        echo "  - Management script updated seamlessly; existing node configs and links remain unchanged"
+      fi
       echo
     fi
+    echo "  v2.1.0 Highlights:"
+    echo "  1. Landing Node Mode: deploy Shadowsocks-2022 (2022-blake3-aes-128-gcm) landing servers with standard ss:// links"
+    echo "  2. Unified Outbound Chaining: paste a landing ss:// link on a relay server to route both Hysteria2 & VLESS traffic through the landing IP without DNS leaks"
+    echo
     echo "  v2.0.0 Highlights:"
     echo "  1. Unified Manager: upgraded from hy2.sh into a multi-protocol manager (nodectl) for Hysteria2 & VLESS"
     echo "  2. VLESS-REALITY: powered by official sing-box (VLESS + XTLS-Vision + REALITY), fully compatible with Mihomo"
-    echo "  3. Shared Port 443 & Masquerade: run Hysteria2 (UDP 443) + VLESS (TCP 443) together without Nginx,"
-    echo "     forwarding unauthenticated probes cleanly to Hysteria2's local loopback HTTPS masquerade"
+    echo "  3. Shared Port 443 & Masquerade: run Hysteria2 (UDP 443) + VLESS (TCP 443) together without Nginx"
     echo "  4. Seamless Migration: adopts existing hy2.sh (>= v1.3.1) & BBR state with zero downtime"
   fi
   echo
@@ -928,6 +1093,116 @@ urlencode() {
   printf '%s' "$out"
 }
 
+urldecode() {
+  local s=${1//+/ }
+  # shellcheck disable=SC2059
+  printf '%b' "${s//%/\\x}"
+}
+
+b64url_nopad() {
+  printf '%s' "$1" | openssl base64 -A | tr '+/' '-_' | tr -d '='
+}
+
+b64url_decode() {
+  local s=${1//-/+}
+  s=${s//_/\/}
+  case $((${#s} % 4)) in
+    2) s+="==" ;;
+    3) s+="=" ;;
+    1) return 1 ;;
+  esac
+  printf '%s' "$s" | openssl base64 -d -A 2>/dev/null
+}
+
+ss_key_bytes() {
+  case $1 in
+    2022-blake3-aes-128-gcm) echo 16 ;;
+    2022-blake3-aes-256-gcm | 2022-blake3-chacha20-poly1305) echo 32 ;;
+    *) return 1 ;;
+  esac
+}
+
+valid_ss_password() {
+  local method=$1 pass=$2 req n
+  req=$(ss_key_bytes "$method") || return 1
+  [[ $pass =~ ^[A-Za-z0-9+/=]+$ ]] || return 1
+  printf '%s' "$pass" | openssl base64 -d -A >/dev/null 2>&1 || return 1
+  n=$(printf '%s' "$pass" | openssl base64 -d -A 2>/dev/null | wc -c | tr -d '[:space:]')
+  [[ $n == "$req" ]]
+}
+
+gen_ss_password() {
+  local sb
+  sb=$(sb_bin)
+  if [[ -n $sb ]]; then
+    "$sb" generate rand --base64 16 2>/dev/null && return 0
+  fi
+  openssl rand -base64 16
+}
+
+valid_ss_port() {
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  local p=$((10#$1))
+  ((p == 443 || (p >= 1024 && p <= 65535)))
+}
+
+valid_any_port() {
+  [[ $1 =~ ^[0-9]+$ ]] || return 1
+  local p=$((10#$1))
+  ((p >= 1 && p <= 65535))
+}
+
+# Parse SIP002 / SIP022 ss:// URI into PARSED_SS_{HOST,PORT,METHOD,PASS,NAME}
+parse_ss_uri() {
+  local raw=${1//[[:space:]]/} rest frag="" userinfo hostport u_dec method pass host port
+  PARSED_SS_HOST="" PARSED_SS_PORT="" PARSED_SS_METHOD="" PARSED_SS_PASS="" PARSED_SS_NAME=""
+  [[ $raw == ss://* ]] || return 1
+  rest=${raw#ss://}
+  if [[ $rest == *#* ]]; then
+    frag=$(urldecode "${rest#*#}")
+    rest=${rest%%#*}
+  fi
+  rest=${rest%%\?*}
+  if [[ $rest != *@* ]]; then
+    rest=$(b64url_decode "$rest") || return 1
+  fi
+  [[ $rest == *@* ]] || return 1
+  userinfo=${rest%@*}
+  hostport=${rest##*@}
+
+  u_dec=$(urldecode "$userinfo")
+  if [[ $u_dec == 2022-blake3-*:* ]]; then
+    method=${u_dec%%:*}
+    pass=${u_dec#*:}
+  else
+    u_dec=$(b64url_decode "$userinfo") || return 1
+    [[ $u_dec == *:* ]] || return 1
+    method=${u_dec%%:*}
+    pass=${u_dec#*:}
+  fi
+
+  if [[ $hostport =~ ^\[([0-9A-Fa-f:.]+)\]:([0-9]{1,5})$ ]]; then
+    host=${BASH_REMATCH[1]}
+    port=$((10#${BASH_REMATCH[2]}))
+  elif [[ $hostport =~ ^([^:]+):([0-9]{1,5})$ ]]; then
+    host=${BASH_REMATCH[1]}
+    port=$((10#${BASH_REMATCH[2]}))
+  else
+    return 1
+  fi
+
+  valid_host "$host" || return 1
+  valid_any_port "$port" || return 1
+  valid_ss_password "$method" "$pass" || return 1
+
+  PARSED_SS_HOST=$host
+  PARSED_SS_PORT=$port
+  PARSED_SS_METHOD=$method
+  PARSED_SS_PASS=$pass
+  PARSED_SS_NAME=$frag
+  return 0
+}
+
 join_lines() {
   local s
   s=$(printf '%s' "$1" | tr '\n' ' ')
@@ -945,9 +1220,14 @@ sb_bin() {
 hy_core_present() { [[ -x $HY_BIN && -f $HY_CONF ]]; }
 sb_core_present() { [[ -n $(sb_bin) && -f $SB_CONF ]]; }
 
+sb_needed() {
+  [[ $VL_ENABLED == yes || $SS_ENABLED == yes || ($OUT_ENABLED == yes && $HY_ENABLED == yes) ]]
+}
+
 hy_installed() { [[ $HY_ENABLED == yes ]] && hy_core_present; }
 vl_installed() { [[ $VL_ENABLED == yes ]] && sb_core_present; }
-any_installed() { hy_installed || vl_installed; }
+ss_installed() { [[ $SS_ENABLED == yes ]] && sb_core_present; }
+any_installed() { hy_installed || vl_installed || ss_installed; }
 
 hy_version() { "$HY_BIN" version 2>/dev/null | awk -F'[:[:space:]]+' '/^Version/{print $2; exit}'; }
 sb_version() {
@@ -1038,6 +1318,29 @@ vl_masq_label() {
   fi
 }
 
+ss_effective_addr() {
+  case $SS_ADDR_MODE in
+    custom) [[ -n $SS_CUSTOM_ADDR ]] && { printf '%s' "${SS_CUSTOM_ADDR//[\[\]]/}"; return 0; } ;;
+    ip6)    detect_ips; [[ -n $PUB_IP6 ]] && { printf '%s' "$PUB_IP6"; return 0; } ;;
+    ip4)    detect_ips; [[ -n $PUB_IP4 ]] && { printf '%s' "$PUB_IP4"; return 0; } ;;
+  esac
+  detect_ips
+  if [[ -n $PUB_IP4 ]]; then printf '%s' "$PUB_IP4"
+  elif [[ -n $PUB_IP6 ]]; then printf '%s' "$PUB_IP6"
+  elif [[ -n $SS_CUSTOM_ADDR ]]; then printf '%s' "${SS_CUSTOM_ADDR//[\[\]]/}"
+  fi
+}
+
+out_hub_label() {
+  if [[ $OUT_ENABLED == yes && -n $OUT_SERVER ]]; then
+    t out_lbl_relay "$(uri_host "$OUT_SERVER")" "$OUT_PORT"
+  elif [[ $SS_ENABLED == yes ]]; then
+    t out_lbl_self "$SS_PORT"
+  else
+    t out_lbl_direct
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # State persistence & migration from hy2.sh
 # ---------------------------------------------------------------------------
@@ -1072,6 +1375,20 @@ save_state() {
       printf 'VL_ADDR_MODE=%q\n' "$VL_ADDR_MODE"
       printf 'VL_CUSTOM_ADDR=%q\n' "$VL_CUSTOM_ADDR"
       printf 'VL_NAME=%q\n' "$VL_NAME"
+      printf 'SS_ENABLED=%q\n' "$SS_ENABLED"
+      printf 'SS_PORT=%q\n' "$SS_PORT"
+      printf 'SS_METHOD=%q\n' "$SS_METHOD"
+      printf 'SS_PASSWORD=%q\n' "$SS_PASSWORD"
+      printf 'SS_ADDR_MODE=%q\n' "$SS_ADDR_MODE"
+      printf 'SS_CUSTOM_ADDR=%q\n' "$SS_CUSTOM_ADDR"
+      printf 'SS_NAME=%q\n' "$SS_NAME"
+      printf 'OUT_ENABLED=%q\n' "$OUT_ENABLED"
+      printf 'OUT_SERVER=%q\n' "$OUT_SERVER"
+      printf 'OUT_PORT=%q\n' "$OUT_PORT"
+      printf 'OUT_METHOD=%q\n' "$OUT_METHOD"
+      printf 'OUT_PASSWORD=%q\n' "$OUT_PASSWORD"
+      printf 'OUT_NAME=%q\n' "$OUT_NAME"
+      printf 'HY_SOCKS_PORT=%q\n' "$HY_SOCKS_PORT"
     } >"$STATE_FILE"
   )
   chmod 600 "$STATE_FILE"
@@ -1081,6 +1398,9 @@ normalize_loaded_state() {
   [[ ${HY_PORT:-} =~ ^[0-9]+$ ]] || HY_PORT=443
   [[ ${HY_LOCAL_PORT:-} =~ ^[0-9]+$ ]] || HY_LOCAL_PORT=18443
   [[ ${VL_PORT:-} =~ ^[0-9]+$ ]] || VL_PORT=443
+  [[ ${SS_PORT:-} =~ ^[0-9]+$ ]] || SS_PORT=0
+  [[ ${OUT_PORT:-} =~ ^[0-9]+$ ]] || OUT_PORT=0
+  [[ ${HY_SOCKS_PORT:-} =~ ^[0-9]+$ ]] || HY_SOCKS_PORT=18080
   HY_BW_UP=$(parse_bw "${HY_BW_UP:-0}") || HY_BW_UP=0
   HY_BW_DOWN=$(parse_bw "${HY_BW_DOWN:-0}") || HY_BW_DOWN=0
   if [[ $HY_BW_MODE != client && $HY_BW_MODE != limit && $HY_BW_MODE != bbr ]]; then
@@ -1089,6 +1409,11 @@ normalize_loaded_state() {
   valid_fp "${VL_FP:-}" || VL_FP=chrome
   [[ $VL_MASQ_MODE == hy2 || $VL_MASQ_MODE == external ]] || VL_MASQ_MODE=external
   [[ $VL_ADDR_MODE == auto || $VL_ADDR_MODE == ip4 || $VL_ADDR_MODE == ip6 || $VL_ADDR_MODE == custom ]] || VL_ADDR_MODE=auto
+  [[ $SS_ENABLED == yes ]] || SS_ENABLED=no
+  ss_key_bytes "${SS_METHOD:-}" >/dev/null 2>&1 || SS_METHOD="2022-blake3-aes-128-gcm"
+  [[ $SS_ADDR_MODE == auto || $SS_ADDR_MODE == ip4 || $SS_ADDR_MODE == ip6 || $SS_ADDR_MODE == custom ]] || SS_ADDR_MODE=auto
+  [[ $OUT_ENABLED == yes ]] || OUT_ENABLED=no
+  ss_key_bytes "${OUT_METHOD:-}" >/dev/null 2>&1 || OUT_METHOD="2022-blake3-aes-128-gcm"
 }
 
 load_legacy_hy2_vars() {
@@ -1114,8 +1439,8 @@ load_legacy_hy2_vars() {
 
 load_state() {
   INSTALLED_VERSION=""
-  HY_ENABLED="no" VL_ENABLED="no"
-  HY_PORT=443 HY_LOCAL_PORT=18443 VL_PORT=443
+  HY_ENABLED="no" VL_ENABLED="no" SS_ENABLED="no" OUT_ENABLED="no"
+  HY_PORT=443 HY_LOCAL_PORT=18443 VL_PORT=443 SS_PORT=0 OUT_PORT=0 HY_SOCKS_PORT=18080
   if [[ -f $STATE_FILE ]]; then
     # shellcheck disable=SC1090
     . "$STATE_FILE"
@@ -1147,6 +1472,11 @@ need_hy_installed() {
 need_vl_installed() {
   need_any_installed || return 1
   vl_installed || { err "$(t vl_not_installed)"; return 1; }
+}
+
+need_ss_installed() {
+  need_any_installed || return 1
+  ss_installed || { err "$(t ss_not_installed)"; return 1; }
 }
 
 # ---------------------------------------------------------------------------
@@ -1304,6 +1634,65 @@ ensure_local_port() {
     fi
   done
   HY_LOCAL_PORT=18443
+}
+
+ensure_socks_port() {
+  local p=${HY_SOCKS_PORT:-18080} out
+  for ((; p <= 18180; p++)); do
+    ((p == HY_LOCAL_PORT)) && continue
+    out=$(port_users_except t "$p" '"sing-box"')
+    if [[ -z $out ]]; then
+      HY_SOCKS_PORT=$p
+      return 0
+    fi
+  done
+  HY_SOCKS_PORT=18080
+}
+
+gen_random_ss_port() {
+  local tries p
+  for ((tries = 0; tries < 40; tries++)); do
+    p=$((20000 + (RANDOM % 35000)))
+    ((p == HY_PORT || p == VL_PORT || p == HY_LOCAL_PORT || p == HY_SOCKS_PORT)) && continue
+    if [[ -z $(port_users_except t "$p" '"sing-box"') && -z $(port_users_except u "$p" '"sing-box"') ]]; then
+      printf '%s' "$p"
+      return 0
+    fi
+  done
+  printf '38492'
+}
+
+check_clock_sync() {
+  command -v timedatectl >/dev/null 2>&1 || return 0
+  local ntp
+  ntp=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+  [[ $ntp == no ]] && warn "$(t ntp_warn)"
+  return 0
+}
+
+check_landing_reachability() {
+  local host=${1//[\[\]]/} port=$2 a4 a6
+  detect_ips
+  if [[ $host == "$PUB_IP4" || ${host,,} == "$PUB_IP6" || (-n $HY_DOMAIN && ${host,,} == "$HY_DOMAIN") ]]; then
+    err "$(t out_self_err)"
+    return 2
+  fi
+  if valid_domain "${host,,}"; then
+    a4=$(resolve "${host,,}" A)
+    a6=$(resolve "${host,,}" AAAA)
+    if { [[ -n $PUB_IP4 ]] && grep -qxF "$PUB_IP4" <<<"$a4"; } ||
+       { [[ -n $PUB_IP6 ]] && grep -qxF "$PUB_IP6" <<<"$a6"; }; then
+      err "$(t out_self_err)"
+      return 2
+    fi
+  fi
+  info "$(t checking_out "$(uri_host "$host")" "$port")"
+  if timeout 5 bash -c "exec 3<>/dev/tcp/$host/$port" 2>/dev/null; then
+    info "$(t out_reach_ok "$(uri_host "$host")" "$port")"
+    return 0
+  fi
+  warn "$(t out_reach_fail "$(uri_host "$host")" "$port")"
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -1751,6 +2140,178 @@ collect_bandwidth() {
   HY_BW_MODE=$mode HY_BW_UP=$up HY_BW_DOWN=$down
 }
 
+collect_ss_port() {
+  local mode=${1:-install} opt_p=${OPT_SS_PORT:-$OPT_PORT} p def out_t out_u
+  def=$SS_PORT
+  ((def == 0)) && def=$(gen_random_ss_port)
+  if [[ -n $opt_p ]] || ((ASSUME_YES)); then
+    p=${opt_p:-$def}
+    valid_ss_port "$p" || die "$(t bad_ss_port)"
+    p=$((10#$p))
+    if ! { [[ $mode == modify && $p == "$SS_PORT" ]]; }; then
+      if { [[ $VL_ENABLED == yes && $p == "$VL_PORT" ]] || [[ $HY_ENABLED == yes && $p == "$HY_PORT" ]]; }; then
+        die "$(t ss_port_required "$p")"
+      fi
+      out_t=$(port_users_except t "$p" '"sing-box"')
+      out_u=$(port_users_except u "$p" '"sing-box"')
+      if [[ -n $out_t || -n $out_u ]]; then
+        [[ -n $out_t ]] && { err "$(t port_busy "$p" tcp)"; echo "$out_t"; }
+        [[ -n $out_u ]] && { err "$(t port_busy "$p" udp)"; echo "$out_u"; }
+        die "$(t ss_port_required "$p")"
+      fi
+    fi
+    SS_PORT=$p
+    return 0
+  fi
+
+  title "$(t ss_port_title)"
+  while :; do
+    ask p "$(t ask_ss_port "$def")" "$def"
+    p=${p//[[:space:]]/}
+    if ! valid_ss_port "$p"; then
+      err "$(t bad_ss_port)"; continue
+    fi
+    p=$((10#$p))
+    [[ $mode == modify && $p == "$SS_PORT" ]] && return 0
+    if { [[ $VL_ENABLED == yes && $p == "$VL_PORT" ]] || [[ $HY_ENABLED == yes && $p == "$HY_PORT" ]]; }; then
+      err "$(t ss_port_required "$p")"; warn "$(t port_retry)"; continue
+    fi
+    out_t=$(port_users_except t "$p" '"sing-box"')
+    out_u=$(port_users_except u "$p" '"sing-box"')
+    if [[ -n $out_t || -n $out_u ]]; then
+      [[ -n $out_t ]] && { err "$(t port_busy "$p" tcp)"; echo "$out_t"; }
+      [[ -n $out_u ]] && { err "$(t port_busy "$p" udp)"; echo "$out_u"; }
+      warn "$(t port_retry)"
+      continue
+    fi
+    SS_PORT=$p
+    return 0
+  done
+}
+
+collect_ss_password() {
+  local p opt=${OPT_SS_PASSWORD:-$OPT_PASSWORD} req
+  SS_METHOD="2022-blake3-aes-128-gcm"
+  req=$(ss_key_bytes "$SS_METHOD")
+  if [[ -n $opt ]]; then
+    p=$opt
+  elif ((ASSUME_YES)); then
+    p=${SS_PASSWORD:-$(gen_ss_password)}
+  else
+    while :; do
+      if [[ $1 == keep && -n $SS_PASSWORD ]] && valid_ss_password "$SS_METHOD" "$SS_PASSWORD"; then
+        read -rp "$(t ask_ss_pass_keep): " p || die "$(t no_input)"
+        p=${p:-$SS_PASSWORD}
+      else
+        read -rp "$(t ask_ss_pass): " p || die "$(t no_input)"
+        p=${p:-$(gen_ss_password)}
+      fi
+      valid_ss_password "$SS_METHOD" "$p" && break
+      err "$(t bad_ss_pass "$req" "$SS_METHOD")"
+    done
+  fi
+  valid_ss_password "$SS_METHOD" "$p" || die "$(t bad_ss_pass "$req" "$SS_METHOD")"
+  SS_PASSWORD=$p
+}
+
+collect_ss_addr() {
+  if [[ -n $OPT_ADDR ]]; then
+    local h=${OPT_ADDR//[\[\]]/}
+    valid_host "$h" || die "$(t bad_addr)"
+    SS_ADDR_MODE=custom
+    SS_CUSTOM_ADDR=$h
+    return 0
+  fi
+  detect_ips
+  if [[ -z $PUB_IP4 && -z $PUB_IP6 ]]; then
+    ((ASSUME_YES)) && die "$(t no_pub_ip)"
+    local custom
+    while :; do
+      ask custom "$(t ask_custom_addr)" "$SS_CUSTOM_ADDR"
+      custom=${custom//[\[\]]/}
+      valid_host "$custom" && { SS_ADDR_MODE=custom; SS_CUSTOM_ADDR=$custom; return 0; }
+      err "$(t bad_addr)"
+    done
+  fi
+  SS_ADDR_MODE=${SS_ADDR_MODE:-auto}
+}
+
+collect_ss_name() {
+  local addr n opt=${OPT_SS_NAME:-$OPT_NAME} def
+  addr=$(ss_effective_addr)
+  def=${SS_NAME:-landing-${addr:-node}}
+  if [[ -n $opt ]]; then n=$opt
+  elif ((ASSUME_YES)); then n=$def
+  else ask n "$(t ask_ss_name)" "$def"; fi
+  SS_NAME=${n:-$def}
+}
+
+collect_outbound_target() {
+  local link=$OPT_SS_LINK c host port method pass name rc req
+  if [[ -n $link ]]; then
+    parse_ss_uri "$link" || die "$(t bad_ss_link)"
+    check_landing_reachability "$PARSED_SS_HOST" "$PARSED_SS_PORT"; rc=$?
+    if ((rc == 2)); then exit 1; fi
+    if ((rc == 1)) && ! confirm "$(t continue_anyway)" n; then exit 1; fi
+    OUT_SERVER=$PARSED_SS_HOST OUT_PORT=$PARSED_SS_PORT
+    OUT_METHOD=$PARSED_SS_METHOD OUT_PASSWORD=$PARSED_SS_PASS
+    OUT_NAME=${PARSED_SS_NAME:-$PARSED_SS_HOST:$PARSED_SS_PORT}
+    return 0
+  fi
+  ((ASSUME_YES)) && die "$(t missing_val "--ss-link")"
+
+  title "$(t out_set_title)"
+  echo "  1. $(t out_input_mode1)"
+  echo "  2. $(t out_input_mode2)"
+  while :; do
+    ask c "$(t choose) [1-2]" "1"
+    case ${c//[[:space:]]/} in
+      1 | 2) c=${c//[[:space:]]/}; break ;;
+      *) err "$(t invalid_choice)" ;;
+    esac
+  done
+
+  if [[ $c == 1 ]]; then
+    while :; do
+      ask link "$(t ask_ss_link)"
+      if ! parse_ss_uri "$link"; then
+        err "$(t bad_ss_link)"; continue
+      fi
+      check_landing_reachability "$PARSED_SS_HOST" "$PARSED_SS_PORT"; rc=$?
+      if ((rc == 0)) || { ((rc == 1)) && confirm "$(t continue_anyway)" n; }; then
+        OUT_SERVER=$PARSED_SS_HOST OUT_PORT=$PARSED_SS_PORT
+        OUT_METHOD=$PARSED_SS_METHOD OUT_PASSWORD=$PARSED_SS_PASS
+        OUT_NAME=${PARSED_SS_NAME:-$PARSED_SS_HOST:$PARSED_SS_PORT}
+        return 0
+      fi
+    done
+  else
+    method="2022-blake3-aes-128-gcm"
+    req=$(ss_key_bytes "$method")
+    while :; do
+      ask host "$(t ask_out_host)" "$OUT_SERVER"
+      host=${host//[\[\]]/}; host=${host//[[:space:]]/}
+      if ! valid_host "$host"; then err "$(t bad_addr)"; continue; fi
+      while :; do
+        ask port "$(t ask_out_port)" "${OUT_PORT/#0/}"
+        port=${port//[[:space:]]/}
+        valid_any_port "$port" && { port=$((10#$port)); break; }
+        err "$(t bad_any_port)"
+      done
+      check_landing_reachability "$host" "$port"; rc=$?
+      ((rc == 0)) && break
+      ((rc == 1)) && confirm "$(t continue_anyway)" n && break
+    done
+    while :; do
+      ask pass "$(t ask_ss_pass)" "$OUT_PASSWORD"
+      valid_ss_password "$method" "$pass" && break
+      err "$(t bad_ss_pass "$req" "$method")"
+    done
+    name="$host:$port"
+    OUT_SERVER=$host OUT_PORT=$port OUT_METHOD=$method OUT_PASSWORD=$pass OUT_NAME=$name
+  fi
+}
+
 print_install_summary() {
   local mode=$1 hy_listen lhttps
   title "$(t summary_title)"
@@ -1763,6 +2324,9 @@ print_install_summary() {
       ;;
     vless)
       printf '  %-16s: %s\n' "$(t sum_mode)" "VLESS (XTLS-Vision + REALITY)"
+      ;;
+    landing)
+      printf '  %-16s: %s\n' "$(t sum_mode)" "Landing Node (Shadowsocks-2022)"
       ;;
   esac
   if [[ $mode == both || $mode == hy2 ]]; then
@@ -1788,6 +2352,14 @@ print_install_summary() {
       "$(t sum_vl_fp)" "$VL_FP" \
       "$(t sum_vl_addr)" "$(uri_host "$(vl_effective_addr)")" \
       "$(t sum_vl_name)" "$VL_NAME"
+  fi
+  if [[ $mode == landing ]]; then
+    printf '  %-16s: %s\n' \
+      "$(t sum_ss_listen)" "TCP + UDP $SS_PORT" \
+      "$(t sum_ss_method)" "$SS_METHOD" \
+      "$(t sum_ss_pass)" "$SS_PASSWORD" \
+      "$(t sum_ss_addr)" "$(uri_host "$(ss_effective_addr)")" \
+      "$(t sum_ss_name)" "$SS_NAME"
   fi
   echo
 }
@@ -1914,6 +2486,16 @@ write_hy_config() {
     echo "    url: $(yaml_str "$HY_MASQ_URL")"
     echo "    rewriteHost: true"
     [[ -n $lhttps ]] && echo "  listenHTTPS: $(yaml_str "$lhttps")"
+    if [[ $OUT_ENABLED == yes && -n $OUT_SERVER ]]; then
+      echo
+      echo "outbounds:"
+      echo "  - name: landing"
+      echo "    type: socks5"
+      echo "    socks5:"
+      echo "      addr: $(yaml_str "127.0.0.1:$HY_SOCKS_PORT")"
+      echo "  - name: direct"
+      echo "    type: direct"
+    fi
     case $HY_BW_MODE in
       limit)
         echo
@@ -1932,54 +2514,118 @@ write_hy_config() {
 }
 
 write_sb_config() {
-  local tmp sb sni hs_host hs_port
+  local tmp sb sni hs_host hs_port ib_str="" b need_dns=0 resolver_line=""
+  local -a inbounds=()
   sb=$(sb_bin)
-  sni=$(vl_effective_sni)
-  read -r hs_host hs_port <<<"$(vl_effective_handshake)"
-  tmp=$(mktemp) || die "mktemp failed"
-  cat >"$tmp" <<EOF
-{
-  "log": {
-    "level": "info",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "::",
-      "listen_port": $VL_PORT,
-      "users": [
+
+  if [[ $VL_ENABLED == yes ]]; then
+    sni=$(vl_effective_sni)
+    read -r hs_host hs_port <<<"$(vl_effective_handshake)"
+    inbounds+=("    {
+      \"type\": \"vless\",
+      \"tag\": \"vless-in\",
+      \"listen\": \"::\",
+      \"listen_port\": $VL_PORT,
+      \"users\": [
         {
-          "uuid": $(json_str "$VL_UUID"),
-          "flow": "xtls-rprx-vision"
+          \"uuid\": $(json_str "$VL_UUID"),
+          \"flow\": \"xtls-rprx-vision\"
         }
       ],
-      "tls": {
-        "enabled": true,
-        "server_name": $(json_str "$sni"),
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": $(json_str "$hs_host"),
-            "server_port": $hs_port
+      \"tls\": {
+        \"enabled\": true,
+        \"server_name\": $(json_str "$sni"),
+        \"reality\": {
+          \"enabled\": true,
+          \"handshake\": {
+            \"server\": $(json_str "$hs_host"),
+            \"server_port\": $hs_port
           },
-          "private_key": $(json_str "$VL_PRIVATE_KEY"),
-          "short_id": [
+          \"private_key\": $(json_str "$VL_PRIVATE_KEY"),
+          \"short_id\": [
             $(json_str "$VL_SHORT_ID")
           ]
         }
       }
-    }
-  ],
-  "outbounds": [
+    }")
+  fi
+
+  if [[ $SS_ENABLED == yes ]]; then
+    inbounds+=("    {
+      \"type\": \"shadowsocks\",
+      \"tag\": \"ss-in\",
+      \"listen\": \"::\",
+      \"listen_port\": $SS_PORT,
+      \"method\": $(json_str "$SS_METHOD"),
+      \"password\": $(json_str "$SS_PASSWORD")
+    }")
+  fi
+
+  if [[ $OUT_ENABLED == yes && $HY_ENABLED == yes ]]; then
+    inbounds+=("    {
+      \"type\": \"socks\",
+      \"tag\": \"hy2-socks-in\",
+      \"listen\": \"127.0.0.1\",
+      \"listen_port\": $HY_SOCKS_PORT
+    }")
+  fi
+
+  for b in "${inbounds[@]}"; do
+    [[ -n $ib_str ]] && ib_str+=","$'\n'
+    ib_str+=$b
+  done
+
+  if [[ $OUT_ENABLED == yes && -n $OUT_SERVER ]]; then
+    if ! valid_ipv4 "$OUT_SERVER" && ! valid_ipv6 "$OUT_SERVER"; then
+      need_dns=1
+      resolver_line=","'
+      "domain_resolver": "local-dns"'
+    fi
+  fi
+
+  tmp=$(mktemp) || die "mktemp failed"
+  {
+    echo "{"
+    echo '  "log": {'
+    echo '    "level": "info",'
+    echo '    "timestamp": true'
+    echo '  },'
+    if ((need_dns)); then
+      echo '  "dns": {'
+      echo '    "servers": ['
+      echo '      {'
+      echo '        "type": "local",'
+      echo '        "tag": "local-dns"'
+      echo '      }'
+      echo '    ]'
+      echo '  },'
+    fi
+    echo '  "inbounds": ['
+    printf '%s\n' "$ib_str"
+    echo '  ],'
+    echo '  "outbounds": ['
+    if [[ $OUT_ENABLED == yes && -n $OUT_SERVER ]]; then
+      cat <<EOOUT
+    {
+      "type": "shadowsocks",
+      "tag": "landing-out",
+      "server": $(json_str "$OUT_SERVER"),
+      "server_port": $OUT_PORT,
+      "method": $(json_str "$OUT_METHOD"),
+      "password": $(json_str "$OUT_PASSWORD")$resolver_line
+    },
+EOOUT
+    fi
+    cat <<'EODIR'
     {
       "type": "direct",
       "tag": "direct"
     }
   ]
 }
-EOF
+EODIR
+  } >"$tmp"
+
   if [[ -n $sb ]]; then
     local chk_err
     if ! chk_err=$("$sb" check -c "$tmp" 2>&1); then
@@ -2099,6 +2745,9 @@ required_ports_desc() {
   if [[ $VL_ENABLED == yes ]]; then
     items+=("TCP $VL_PORT")
   fi
+  if [[ $SS_ENABLED == yes ]]; then
+    items+=("TCP $SS_PORT" "UDP $SS_PORT")
+  fi
   local out="" p
   for p in "${items[@]}"; do
     [[ -n $out ]] && out+=", "
@@ -2116,6 +2765,9 @@ ufw_allow_hint() {
   if [[ $VL_ENABLED == yes ]]; then
     cmds+=("ufw allow $VL_PORT/tcp")
   fi
+  if [[ $SS_ENABLED == yes ]]; then
+    cmds+=("ufw allow $SS_PORT/tcp" "ufw allow $SS_PORT/udp")
+  fi
   local out="" c
   for c in "${cmds[@]}"; do
     [[ -n $out ]] && out+=" && "
@@ -2132,6 +2784,9 @@ warn_firewall() {
     warn "$(t fw_ufw_manual "$ports" "$(ufw_allow_hint)")"
   fi
   warn "$(t fw_cloud "$ports")"
+  if [[ $SS_ENABLED == yes && $HY_ENABLED != yes && $VL_ENABLED != yes ]]; then
+    info "$(t fw_ss_restrict_hint "$SS_PORT" "$SS_PORT")"
+  fi
 }
 
 # ---- Service startup & verification ---------------------------------------
@@ -2167,6 +2822,13 @@ restart_and_verify_hy() {
   return 1
 }
 
+sb_listeners_ready() {
+  if [[ $VL_ENABLED == yes ]] && [[ -z $(ss -H -tln "sport = :$VL_PORT" 2>/dev/null) ]]; then return 1; fi
+  if [[ $SS_ENABLED == yes ]] && [[ -z $(ss -H -tln "sport = :$SS_PORT" 2>/dev/null) ]]; then return 1; fi
+  if [[ $OUT_ENABLED == yes && $HY_ENABLED == yes ]] && [[ -z $(ss -H -tln "sport = :$HY_SOCKS_PORT" 2>/dev/null) ]]; then return 1; fi
+  return 0
+}
+
 restart_and_verify_sb() {
   local since state logs i
   since=$(date '+%Y-%m-%d %H:%M:%S')
@@ -2179,7 +2841,7 @@ restart_and_verify_sb() {
     sleep 1
     logs=$(journalctl -u "$SB_SERVICE" --since "$since" --no-pager -o cat 2>/dev/null)
     state=$(systemctl is-active "$SB_SERVICE" 2>/dev/null)
-    if [[ $state == active ]] && [[ -n $(ss -H -tln "sport = :$VL_PORT" 2>/dev/null) ]]; then
+    if [[ $state == active ]] && sb_listeners_ready; then
       info "$(t sb_start_ok)"
       return 0
     fi
@@ -2216,27 +2878,40 @@ restore_backup() {
   local ts=$1
   [[ -f "$BACKUP_DIR/state.env.$ts" ]] && install -m 600 "$BACKUP_DIR/state.env.$ts" "$STATE_FILE"
   [[ -f "$BACKUP_DIR/hy-config.yaml.$ts" ]] && install -m 640 -o root -g "$(hy_group)" "$BACKUP_DIR/hy-config.yaml.$ts" "$HY_CONF"
-  [[ -f "$BACKUP_DIR/sb-config.json.$ts" ]] && install -m 640 -o root -g "$(sb_group)" "$BACKUP_DIR/sb-config.json.$ts" "$SB_CONF"
+  if [[ -f "$BACKUP_DIR/sb-config.json.$ts" ]]; then
+    install -m 640 -o root -g "$(sb_group)" "$BACKUP_DIR/sb-config.json.$ts" "$SB_CONF"
+  else
+    rm -f "$SB_CONF"
+  fi
   load_state
   sync_sb_systemd_dropin
   systemctl daemon-reload
+  if ! sb_needed; then
+    systemctl disable --now "$SB_SERVICE" >/dev/null 2>&1 || true
+  fi
   if [[ $(hy_effective_listen_https) == :* ]]; then
-    [[ $VL_ENABLED == yes ]] && systemctl restart "$SB_SERVICE" >/dev/null 2>&1
+    sb_needed && systemctl restart "$SB_SERVICE" >/dev/null 2>&1
     [[ $HY_ENABLED == yes ]] && restart_and_verify_hy >/dev/null 2>&1
   else
     [[ $HY_ENABLED == yes ]] && restart_and_verify_hy >/dev/null 2>&1
-    [[ $VL_ENABLED == yes ]] && systemctl restart "$SB_SERVICE" >/dev/null 2>&1
+    sb_needed && systemctl restart "$SB_SERVICE" >/dev/null 2>&1
   fi
 }
 
-# apply_changes <hy|vl|both> [--firewall]
-# Automatically orders service restarts when public TCP ports hand off between HY2 and VLESS.
+# apply_changes <hy|sb|vl|both> [--firewall] [--quiet-share]
+# Automatically orders service restarts when public TCP ports hand off between HY2 and sing-box.
 apply_changes() {
-  local scope=${1:-both} fw_hint=0 ok=1
-  [[ ${2:-} == --firewall ]] && fw_hint=1
+  local scope=${1:-both} fw_hint=0 quiet_share=0 ok=1 a
+  shift || true
+  for a in "$@"; do
+    [[ $a == --firewall ]] && fw_hint=1
+    [[ $a == --quiet-share ]] && quiet_share=1
+  done
+  [[ $scope == vl ]] && scope=sb
+
   backup_configs
   if [[ $HY_ENABLED == yes ]]; then write_hy_config; fi
-  if [[ $VL_ENABLED == yes ]]; then
+  if sb_needed; then
     if ! write_sb_config; then
       restore_backup "$LAST_BACKUP_TS"
       warn "$(t backup_restored)"
@@ -2246,22 +2921,31 @@ apply_changes() {
   save_state
 
   if [[ $scope == both ]]; then
-    if [[ $(hy_effective_listen_https) == :* ]]; then
-      [[ $VL_ENABLED == yes ]] && { restart_and_verify_sb || ok=0; }
+    if ! sb_needed; then
+      systemctl disable --now "$SB_SERVICE" >/dev/null 2>&1 || true
+      rm -f "$SB_CONF"
+      [[ $HY_ENABLED == yes ]] && { restart_and_verify_hy || ok=0; }
+    elif [[ $(hy_effective_listen_https) == :* ]]; then
+      restart_and_verify_sb || ok=0
       ((ok)) && [[ $HY_ENABLED == yes ]] && { restart_and_verify_hy || ok=0; }
     else
       [[ $HY_ENABLED == yes ]] && { restart_and_verify_hy || ok=0; }
-      ((ok)) && [[ $VL_ENABLED == yes ]] && { restart_and_verify_sb || ok=0; }
+      ((ok)) && { restart_and_verify_sb || ok=0; }
     fi
   elif [[ $scope == hy ]]; then
     restart_and_verify_hy || ok=0
-  elif [[ $scope == vl ]]; then
-    restart_and_verify_sb || ok=0
+  elif [[ $scope == sb ]]; then
+    if sb_needed; then
+      restart_and_verify_sb || ok=0
+    else
+      systemctl disable --now "$SB_SERVICE" >/dev/null 2>&1 || true
+      rm -f "$SB_CONF"
+    fi
   fi
 
   if ((ok)); then
     ((fw_hint)) && warn_firewall
-    show_share
+    ((quiet_share)) || show_share
     return 0
   fi
   restore_backup "$LAST_BACKUP_TS"
@@ -2546,6 +3230,7 @@ do_install_hy() {
   collect_bandwidth
 
   HY_ENABLED=yes
+  [[ $OUT_ENABLED == yes ]] && ensure_socks_port
   if [[ $prev_vl == yes ]] && vl_installed; then
     if [[ $VL_MASQ_MODE != hy2 ]]; then
       if [[ ${OPT_VL_MASQ,,} == hy2 ]]; then
@@ -2565,13 +3250,15 @@ do_install_hy() {
   print_install_summary hy2
   confirm "$(t proceed)" y || { load_state; info "$(t aborted)"; return 0; }
 
-  [[ $prev_vl == yes ]] && backup_configs
+  local had_sb=0
+  sb_core_present && had_sb=1
+  ((had_sb)) && backup_configs
   install_hy_core
   prepare_hy_dirs
   tune_hy_sysctl
   info "$(t writing_config)"
   write_hy_config
-  if [[ $prev_vl == yes ]] && vl_installed; then
+  if sb_needed && ((had_sb)); then
     write_sb_config || { restore_backup "$LAST_BACKUP_TS"; warn "$(t backup_restored)"; return 1; }
   fi
   warn_firewall
@@ -2579,7 +3266,7 @@ do_install_hy() {
   install_shortcut
 
   local ok=1
-  if [[ $prev_vl == yes ]] && vl_installed; then
+  if sb_needed && ((had_sb)); then
     if [[ $(hy_effective_listen_https) == :* ]]; then
       restart_and_verify_sb || ok=0
       ((ok)) && { restart_and_verify_hy || ok=0; }
@@ -2666,12 +3353,58 @@ do_install_vl() {
   info "$(t install_done)"
 }
 
+do_install_ss() {
+  require_manageable || return 1
+  check_os
+  load_state
+  if [[ $OUT_ENABLED == yes ]]; then
+    err "$(t ss_conflict_out)"
+    return 1
+  fi
+  if ss_installed && ! confirm "$(t already_installed_ss)" n; then info "$(t aborted)"; return 0; fi
+
+  install_deps
+  check_clock_sync
+  collect_ss_port install
+  collect_ss_password keep
+  collect_ss_addr
+  SS_ENABLED=yes
+  collect_ss_name
+
+  print_install_summary landing
+  confirm "$(t proceed)" y || { load_state; info "$(t aborted)"; return 0; }
+
+  local had_any=0
+  { hy_core_present || sb_core_present; } && had_any=1
+  ((had_any)) && backup_configs
+
+  install_sb_core
+  prepare_sb_dirs
+  info "$(t writing_config)"
+  if ! write_sb_config; then
+    ((had_any)) && { restore_backup "$LAST_BACKUP_TS"; warn "$(t backup_restored)"; }
+    return 1
+  fi
+  warn_firewall
+  save_state
+  install_shortcut
+
+  if ! restart_and_verify_sb; then
+    ((had_any)) && { restore_backup "$LAST_BACKUP_TS"; warn "$(t backup_restored)"; }
+    return 1
+  fi
+  show_share
+  info "$(t install_done)"
+}
+
 do_install_dispatch() {
   require_manageable || return 1
   local mode=${TARGET,,} c
   if [[ -z $mode ]]; then
     if ((ASSUME_YES)); then
-      if [[ -n $OPT_DOMAIN && -n $OPT_MASQ ]]; then
+      if [[ -n $OPT_SS_PORT$OPT_SS_PASSWORD$OPT_SS_NAME ]]; then
+        mode=landing
+      elif [[ -n $OPT_DOMAIN && -n $OPT_MASQ ]]; then
         if [[ -n $OPT_UUID$OPT_FP$OPT_VL_PORT$OPT_VL_MASQ$OPT_SNI ]]; then mode=both; else mode=hy2; fi
       elif [[ -n $OPT_SNI ]]; then
         mode=vless
@@ -2683,12 +3416,14 @@ do_install_dispatch() {
       echo "  1. $(t im_both)"
       echo "  2. $(t im_hy2)"
       echo "  3. $(t im_vless)"
+      echo "  4. $(t im_landing)"
       while :; do
-        ask c "$(t choose) [1-3]" "1"
+        ask c "$(t choose) [1-4]" "1"
         case ${c//[[:space:]]/} in
           1) mode=both; break ;;
           2) mode=hy2; break ;;
           3) mode=vless; break ;;
+          4) mode=landing; break ;;
           *) err "$(t invalid_choice)" ;;
         esac
       done
@@ -2698,6 +3433,7 @@ do_install_dispatch() {
     both | all) do_install_both ;;
     hy2 | hysteria | hysteria2) do_install_hy ;;
     vless | reality) do_install_vl ;;
+    landing | ss | ss2022) do_install_ss ;;
     *) die "$(t unknown_arg "$mode")" ;;
   esac
 }
@@ -2716,7 +3452,8 @@ do_update_hy() {
 }
 
 do_update_sb() {
-  need_vl_installed || return 1
+  need_any_installed || return 1
+  sb_needed || { err "$(t vl_not_installed)"; return 1; }
   require_manageable || return 1
   local old new
   old=$(sb_version)
@@ -2738,7 +3475,7 @@ do_update_all() {
   require_manageable || return 1
   local rc=0
   if hy_installed; then do_update_hy || rc=1; fi
-  if vl_installed; then do_update_sb || rc=1; fi
+  if sb_needed && sb_core_present; then do_update_sb || rc=1; fi
   return $rc
 }
 
@@ -2800,39 +3537,75 @@ do_uninstall_hy() {
 
   HY_ENABLED=no
   HY_DOMAIN="" HY_EMAIL="" HY_PASSWORD="" HY_MASQ_URL="" HY_NAME=""
+  if ! vl_installed && ! ss_installed; then
+    OUT_ENABLED=no OUT_SERVER="" OUT_PORT=0 OUT_PASSWORD="" OUT_NAME=""
+    [[ -n $(sb_bin) || -d $SB_DIR ]] && remove_sb_files
+    finalize_full_cleanup
+  fi
   sync_sb_systemd_dropin
   systemctl daemon-reload
-
-  if vl_installed; then
-    save_state
-    info "$(t uninstall_hy_done)"
-    show_share
-    return 0
+  if sb_needed; then
+    write_sb_config && restart_and_verify_sb >/dev/null 2>&1 || true
   fi
-  finalize_full_cleanup
+  save_state
+  info "$(t uninstall_hy_done)"
+  show_share
+  return 0
 }
 
 do_uninstall_vl() {
   load_state
-  if [[ -z $(sb_bin) && ! -d $SB_DIR ]]; then err "$(t vl_not_installed)"; return 1; fi
+  if ! vl_installed && [[ $VL_ENABLED != yes ]]; then err "$(t vl_not_installed)"; return 1; fi
   confirm "$(t uninstall_vl_confirm)" n || { info "$(t aborted)"; return 0; }
 
   local old_port=$VL_PORT
-  remove_sb_files
-  if ufw_active; then warn "$(t fw_ufw_uninstall "TCP $old_port")"; fi
-
   VL_ENABLED=no
   VL_UUID="" VL_PRIVATE_KEY="" VL_PUBLIC_KEY="" VL_SHORT_ID="" VL_SNI="" VL_NAME=""
+
+  if sb_needed; then
+    write_sb_config && restart_and_verify_sb >/dev/null 2>&1 || true
+  else
+    remove_sb_files
+  fi
+  if ufw_active; then warn "$(t fw_ufw_uninstall "TCP $old_port")"; fi
   systemctl daemon-reload
 
-  if hy_installed; then
-    # If HY2 wanted TCP_MASQ=yes and port is now free, restore HY2's public TCP masquerade listener
-    if [[ $HY_TCP_MASQ == yes && -z $(port_users_except t "$HY_PORT" '"hysteria"') ]]; then
+  if hy_installed || ss_installed; then
+    if hy_installed && [[ $HY_TCP_MASQ == yes && -z $(port_users_except t "$HY_PORT" '"hysteria"') ]]; then
       write_hy_config
       restart_and_verify_hy >/dev/null 2>&1 || true
     fi
     save_state
     info "$(t uninstall_vl_done)"
+    show_share
+    return 0
+  fi
+  OUT_ENABLED=no
+  finalize_full_cleanup
+}
+
+do_uninstall_ss() {
+  load_state
+  if ! ss_installed && [[ $SS_ENABLED != yes ]]; then err "$(t ss_not_installed)"; return 1; fi
+  confirm "$(t uninstall_ss_confirm)" n || { info "$(t aborted)"; return 0; }
+
+  local old_port=$SS_PORT
+  SS_ENABLED=no
+  SS_PORT=0 SS_PASSWORD="" SS_NAME=""
+
+  if sb_needed; then
+    write_sb_config && restart_and_verify_sb >/dev/null 2>&1 || true
+  else
+    remove_sb_files
+  fi
+  if ufw_active && ((old_port > 0)); then
+    warn "$(t fw_ufw_uninstall "TCP $old_port, UDP $old_port")"
+  fi
+  systemctl daemon-reload
+
+  if hy_installed || vl_installed; then
+    save_state
+    info "$(t uninstall_ss_done)"
     show_share
     return 0
   fi
@@ -2851,7 +3624,7 @@ do_uninstall_all() {
   [[ -x $HY_BIN || -d $HY_DIR ]] && remove_hy_files
   [[ -n $(sb_bin) || -d $SB_DIR ]] && remove_sb_files
   if [[ -n $ports ]] && ufw_active; then warn "$(t fw_ufw_uninstall "$ports")"; fi
-  HY_ENABLED=no VL_ENABLED=no
+  HY_ENABLED=no VL_ENABLED=no SS_ENABLED=no OUT_ENABLED=no
   finalize_full_cleanup
 }
 
@@ -2860,8 +3633,87 @@ do_uninstall_dispatch() {
     '' | all | both) do_uninstall_all ;;
     hy2 | hysteria | hysteria2) do_uninstall_hy ;;
     vless | reality) do_uninstall_vl ;;
+    landing | ss | ss2022) do_uninstall_ss ;;
     *) die "$(t unknown_arg "$TARGET")" ;;
   esac
+}
+
+# ---- Relay Outbound Chaining (to remote SS-2022 Landing Server) -----------
+do_outbound_status() {
+  need_any_installed || return 1
+  title "$(t out_info_title)"
+  if [[ $SS_ENABLED == yes ]]; then
+    printf '  %s\n' "$(t out_lbl_self "$SS_PORT")"
+    return 0
+  fi
+  if [[ $OUT_ENABLED != yes || -z $OUT_SERVER ]]; then
+    printf '  %s\n' "$(t out_status_direct)"
+    return 0
+  fi
+  printf '  %-18s: %s (%s)\n' "$(t out_lbl_target)" "$(uri_host "$OUT_SERVER"):$OUT_PORT" "${OUT_NAME:--}"
+  printf '  %-18s: %s\n' "$(t out_lbl_cipher)" "$OUT_METHOD"
+  if hy_installed; then
+    printf '  %-18s: 127.0.0.1:%s (SOCKS5 -> sing-box)\n' "$(t out_lbl_bridge)" "$HY_SOCKS_PORT"
+  fi
+  echo
+  check_landing_reachability "$OUT_SERVER" "$OUT_PORT" || true
+}
+
+do_outbound_set() {
+  need_any_installed || return 1
+  require_manageable || return 1
+  if [[ $SS_ENABLED == yes ]]; then
+    err "$(t out_conflict_ss)"
+    return 1
+  fi
+  if ! hy_installed && ! vl_installed; then
+    err "$(t out_need_proto)"
+    return 1
+  fi
+  install_deps
+  check_clock_sync
+
+  local old_en=$OUT_ENABLED old_srv=$OUT_SERVER old_port=$OUT_PORT old_m=$OUT_METHOD old_pw=$OUT_PASSWORD old_nm=$OUT_NAME
+  collect_outbound_target
+  if [[ $old_en == yes && $OUT_SERVER == "$old_srv" && $OUT_PORT == "$old_port" && $OUT_METHOD == "$old_m" && $OUT_PASSWORD == "$old_pw" ]]; then
+    info "$(t no_change)"
+    return 0
+  fi
+
+  OUT_ENABLED=yes
+  if hy_installed; then
+    ensure_socks_port
+  fi
+  install_sb_core
+  prepare_sb_dirs
+
+  local scope=sb
+  hy_installed && scope=both
+  if apply_changes "$scope" --quiet-share; then
+    info "$(t out_set_ok "$(uri_host "$OUT_SERVER")" "$OUT_PORT")"
+    return 0
+  fi
+  OUT_ENABLED=$old_en OUT_SERVER=$old_srv OUT_PORT=$old_port OUT_METHOD=$old_m OUT_PASSWORD=$old_pw OUT_NAME=$old_nm
+  return 1
+}
+
+do_outbound_clear() {
+  need_any_installed || return 1
+  require_manageable || return 1
+  if [[ $OUT_ENABLED != yes ]]; then
+    info "$(t out_status_direct)"
+    return 0
+  fi
+  confirm "$(t out_clear_confirm)" n || { info "$(t aborted)"; return 0; }
+  OUT_ENABLED=no
+  OUT_SERVER="" OUT_PORT=0 OUT_PASSWORD="" OUT_NAME=""
+  local scope=sb
+  hy_installed && scope=both
+  if apply_changes "$scope" --quiet-share; then
+    info "$(t out_clear_ok)"
+    return 0
+  fi
+  return 1
 }
 
 # Only node share links are printed (no client configs or QR codes).
@@ -2878,6 +3730,12 @@ show_share() {
     sni=$(vl_effective_sni)
     echo "vless://$VL_UUID@$addr:$VL_PORT?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$sni&fp=$VL_FP&pbk=$(urlencode "$VL_PUBLIC_KEY")&sid=$VL_SHORT_ID&type=tcp#$(urlencode "$VL_NAME")"
   fi
+  if [[ ($filter == all || $filter == landing) ]] && ss_installed; then
+    local s_addr uinfo
+    s_addr=$(uri_host "$(ss_effective_addr)")
+    uinfo=$(b64url_nopad "$SS_METHOD:$SS_PASSWORD")
+    echo "ss://$uinfo@$s_addr:$SS_PORT#$(urlencode "$SS_NAME")"
+  fi
 }
 
 show_status() {
@@ -2886,8 +3744,8 @@ show_status() {
     title "Hysteria2"
     systemctl status "$HY_SERVICE" --no-pager -l 2>/dev/null | head -n 10
   fi
-  if vl_installed; then
-    title "VLESS (sing-box)"
+  if sb_needed && sb_core_present; then
+    title "sing-box"
     systemctl status "$SB_SERVICE" --no-pager -l 2>/dev/null | head -n 10
   fi
   title "$(t listening)"
@@ -2904,7 +3762,15 @@ show_status() {
   if vl_installed; then
     ss -H -tlnp "sport = :$VL_PORT" 2>/dev/null
   fi
+  if ss_installed; then
+    ss -H -tlnp "sport = :$SS_PORT" 2>/dev/null
+    ss -H -ulnp "sport = :$SS_PORT" 2>/dev/null
+  fi
+  if [[ $OUT_ENABLED == yes && $HY_ENABLED == yes ]]; then
+    ss -H -tlnp "sport = :$HY_SOCKS_PORT" 2>/dev/null
+  fi
   echo
+  printf '%s: %s\n' "$(t lbl_outbound)" "$(out_hub_label)"
   printf '%s\n' "$(t bbr_cur "$(bbr_cc)" "$(bbr_qdisc)")"
 }
 
@@ -2916,13 +3782,16 @@ show_hy_logs() {
   trap - INT
 }
 
-show_vl_logs() {
-  need_vl_installed || return 1
+show_sb_logs() {
+  need_any_installed || return 1
+  sb_needed || { err "$(t vl_not_installed)"; return 1; }
   info "$(t logs_hint)"
   trap ':' INT
   journalctl -u "$SB_SERVICE" -n 50 -f --no-pager
   trap - INT
 }
+
+show_vl_logs() { show_sb_logs; }
 
 find_cert() { find "$HY_ACME_DIR" -type f -name "$HY_DOMAIN.crt" 2>/dev/null | head -n 1; }
 
@@ -3122,6 +3991,61 @@ modify_vl_name() {
   save_state; info "$(t saved)"; show_share
 }
 
+modify_ss_password() { collect_ss_password new; apply_changes sb; }
+
+modify_ss_port() {
+  local old_port=$SS_PORT
+  collect_ss_port modify
+  if [[ $SS_PORT == "$old_port" ]]; then info "$(t no_change)"; return 0; fi
+  apply_changes sb --firewall
+}
+
+modify_ss_addr() {
+  detect_ips
+  local -a modes=() labels=()
+  local c def=1 i cur_desc
+  cur_desc=$(ss_effective_addr)
+  if [[ -n $PUB_IP4 ]]; then
+    modes+=(ip4); labels+=("$(t addr_ip4 "$PUB_IP4")")
+  fi
+  if [[ -n $PUB_IP6 ]]; then
+    modes+=(ip6); labels+=("$(t addr_ip6 "$PUB_IP6")")
+  fi
+  modes+=(custom); labels+=("$(t addr_custom)")
+
+  title "$(t ss_addr_title)"
+  for i in "${!modes[@]}"; do
+    [[ ${modes[i]} == "$SS_ADDR_MODE" ]] && def=$((i + 1))
+    printf '  %d. %s\n' "$((i + 1))" "${labels[i]}"
+  done
+  while :; do
+    ask c "$(t choose) [1-${#modes[@]}]" "$def"
+    c=${c//[[:space:]]/}
+    if [[ $c =~ ^[1-9][0-9]*$ ]] && ((c >= 1 && c <= ${#modes[@]})); then
+      SS_ADDR_MODE=${modes[c - 1]}
+      break
+    fi
+    err "$(t invalid_choice)"
+  done
+  if [[ $SS_ADDR_MODE == custom ]]; then
+    local custom
+    while :; do
+      ask custom "$(t ask_custom_addr)" "${SS_CUSTOM_ADDR:-$cur_desc}"
+      custom=${custom//[\[\]]/}
+      if valid_host "$custom"; then SS_CUSTOM_ADDR=$custom; break; fi
+      err "$(t bad_addr)"
+    done
+  fi
+  save_state; info "$(t saved)"; show_share
+}
+
+modify_ss_name() {
+  local old=$SS_NAME
+  ask SS_NAME "$(t ask_ss_name)" "$SS_NAME"
+  SS_NAME=${SS_NAME:-$old}
+  save_state; info "$(t saved)"; show_share
+}
+
 hy_service_stop() {
   if vl_installed && [[ $VL_MASQ_MODE == hy2 ]]; then
     confirm "$(t hy_stop_vl_warn "$HY_LOCAL_PORT")" n || return 0
@@ -3165,18 +4089,27 @@ proto_status_line() {
 }
 
 print_header() {
-  local vs hy_extra="" vl_extra=""
+  local vs hy_extra="" vl_extra="" ss_extra=""
   vs=$(version_state)
   echo "======================================================"
   echo "   $(t m_title)  v$SCRIPT_VERSION"
   case $vs in
     current | legacy | newer)
-      [[ $HY_ENABLED == yes ]] && hy_extra="UDP $HY_PORT   $HY_DOMAIN"
-      if [[ $VL_ENABLED == yes ]]; then
-        vl_extra="TCP $VL_PORT   $(vl_masq_label)"
+      if [[ $SS_ENABLED == yes && $HY_ENABLED != yes && $VL_ENABLED != yes ]]; then
+        ss_extra="TCP+UDP $SS_PORT   $(uri_host "$(ss_effective_addr)")"
+        proto_status_line "SS-2022" "yes" "$SB_SERVICE" "$(sb_version)" "$ss_extra"
+      else
+        [[ $HY_ENABLED == yes ]] && hy_extra="UDP $HY_PORT   $HY_DOMAIN"
+        [[ $VL_ENABLED == yes ]] && vl_extra="TCP $VL_PORT   $(vl_masq_label)"
+        proto_status_line "Hysteria2" "$HY_ENABLED" "$HY_SERVICE" "$([[ $HY_ENABLED == yes ]] && hy_version)" "$hy_extra"
+        proto_status_line "VLESS" "$VL_ENABLED" "$SB_SERVICE" "$([[ $VL_ENABLED == yes ]] && sb_version)" "$vl_extra"
+        if [[ $SS_ENABLED == yes ]]; then
+          ss_extra="TCP+UDP $SS_PORT   $(uri_host "$(ss_effective_addr)")"
+          proto_status_line "SS-2022" "yes" "$SB_SERVICE" "$(sb_version)" "$ss_extra"
+        else
+          printf '   %-10s: %s\n' "$(t lbl_outbound)" "$(out_hub_label)"
+        fi
       fi
-      proto_status_line "Hysteria2" "$HY_ENABLED" "$HY_SERVICE" "$([[ $HY_ENABLED == yes ]] && hy_version)" "$hy_extra"
-      proto_status_line "VLESS" "$VL_ENABLED" "$SB_SERVICE" "$([[ $VL_ENABLED == yes ]] && sb_version)" "$vl_extra"
       printf '   %-10s: %s (%s)\n' "TCP BBR" "$(bbr_cc)" "$(bbr_qdisc)"
       ;;
     partial)
@@ -3240,7 +4173,7 @@ menu_loop() {
 build_logs_menu() {
   menu_begin
   hy_installed && menu_item act show_hy_logs "$(t ml_hy)"
-  vl_installed && menu_item act show_vl_logs "$(t ml_vl)"
+  if sb_needed && sb_core_present; then menu_item act show_sb_logs "$(t ml_sb)"; fi
 }
 menu_logs() { need_any_installed || return 1; menu_loop build_logs_menu m_logs_h; }
 
@@ -3248,7 +4181,7 @@ build_update_menu() {
   menu_begin
   menu_item act do_update_all "$(t mu_all)"
   hy_installed && menu_item act do_update_hy "$(t m_update_hy)"
-  vl_installed && menu_item act do_update_sb "$(t m_update_sb)"
+  if sb_needed && sb_core_present; then menu_item act do_update_sb "$(t m_update_sb)"; fi
 }
 menu_updates() { need_any_installed || return 1; require_manageable || return 1; menu_loop build_update_menu m_update_h; }
 
@@ -3334,39 +4267,84 @@ build_vl_mgr() {
 }
 menu_vl_mgr() { need_vl_installed || return 1; require_manageable || return 1; menu_loop build_vl_mgr m_vl_mgr_h; }
 
+menu_ss_service() { need_ss_installed || return 1; require_manageable || return 1; menu_loop build_vl_service m_ss_service_h; }
+
+build_ss_mgr() {
+  ss_installed || return 1
+  menu_begin
+  menu_section "$(t m_sec_proto)"
+  menu_item act modify_ss_password "$(t mm_ss_pass)"
+  menu_item act modify_ss_port "$(t mm_ss_port)   ($(t current): $SS_PORT)"
+  menu_item act modify_ss_addr "$(t mm_ss_addr)   ($(t current): $(uri_host "$(ss_effective_addr)"))"
+  menu_item act modify_ss_name "$(t mm_ss_name)   ($(t current): $SS_NAME)"
+  menu_item sub menu_ss_service "$(t m_service)"
+  menu_section "$(t m_sec_maint)"
+  menu_item danger do_install_ss "$(t m_reinstall_ss)"
+  menu_item danger do_uninstall_ss "$(t m_uninstall_ss)"
+}
+menu_ss_mgr() { need_ss_installed || return 1; require_manageable || return 1; menu_loop build_ss_mgr m_ss_mgr_h; }
+
+build_out_hub() {
+  any_installed || return 1
+  if ss_installed; then
+    build_ss_mgr
+    return $?
+  fi
+  menu_begin
+  if [[ $OUT_ENABLED == yes && -n $OUT_SERVER ]]; then
+    menu_item act do_outbound_status "$(t mo_info)"
+    menu_item act do_outbound_set "$(t mo_change)   ($(t current): $(uri_host "$OUT_SERVER"):$OUT_PORT)"
+    menu_item danger do_outbound_clear "$(t mo_clear)"
+  else
+    menu_item act do_outbound_set "$(t mo_set)"
+    menu_item act do_install_ss "$(t mo_enable_self)"
+  fi
+}
+menu_out_hub() { need_any_installed || return 1; require_manageable || return 1; menu_loop build_out_hub m_out_hub_h; }
+
 # --- Main menu --------------------------------------------------------------
 build_main() {
   menu_begin
   case $(version_state) in
     current)
+      local pure_ss=0
+      [[ $SS_ENABLED == yes && $HY_ENABLED != yes && $VL_ENABLED != yes ]] && pure_ss=1
       menu_section "$(t m_sec_common)"
       menu_item act show_share "$(t m_share)"
       menu_item act show_status "$(t m_status)"
-      if hy_installed && vl_installed; then
+      if hy_installed && sb_needed && sb_core_present; then
         menu_item sub menu_logs "$(t m_logs_sub)"
       elif hy_installed; then
         menu_item act show_hy_logs "$(t m_logs)"
       else
-        menu_item act show_vl_logs "$(t m_logs)"
+        menu_item act show_sb_logs "$(t m_logs)"
       fi
 
       menu_section "$(t m_sec_proto)"
-      if hy_installed; then
-        menu_item sub menu_hy_mgr "$(t m_hy_mgr)"
+      if ((pure_ss)); then
+        menu_item sub menu_ss_mgr "$(t m_ss_mgr)"
       else
-        menu_item act do_install_hy "$(t m_inst_hy_co)"
-      fi
-      if vl_installed; then
-        menu_item sub menu_vl_mgr "$(t m_vl_mgr)"
-      else
-        menu_item act do_install_vl "$(t m_inst_vl_co)"
+        if hy_installed; then
+          menu_item sub menu_hy_mgr "$(t m_hy_mgr)"
+        else
+          menu_item act do_install_hy "$(t m_inst_hy_co)"
+        fi
+        if vl_installed; then
+          menu_item sub menu_vl_mgr "$(t m_vl_mgr)"
+        else
+          menu_item act do_install_vl "$(t m_inst_vl_co)"
+        fi
+        menu_item sub menu_out_hub "$(t m_out_hub)   ($(t current): $(out_hub_label))"
       fi
       menu_item act bbr_toggle "$(t m_bbr "$(bbr_cc)")"
 
       menu_section "$(t m_sec_maint)"
       menu_item act self_update "$(t m_selfupdate)"
       menu_item act show_changelog "$(t m_changelog)"
-      if hy_installed && vl_installed; then
+      if ((pure_ss)); then
+        menu_item act do_update_sb "$(t m_update_sb)"
+        menu_item danger do_uninstall_ss "$(t m_uninstall_ss)"
+      elif hy_installed && sb_needed && sb_core_present; then
         menu_item sub menu_updates "$(t m_update_sub)"
         menu_item danger do_uninstall_all "$(t m_uninstall_all)"
       elif hy_installed; then
@@ -3389,6 +4367,7 @@ build_main() {
       menu_item act do_install_both "$(t m_inst_both)"
       menu_item act do_install_hy "$(t m_inst_hy)"
       menu_item act do_install_vl "$(t m_inst_vl)"
+      menu_item act do_install_ss "$(t m_inst_landing)"
       menu_item act self_update "$(t m_selfupdate)"
       menu_item danger do_uninstall_all "$(t m_uninstall_all)"
       ;;
@@ -3396,6 +4375,7 @@ build_main() {
       menu_item act do_install_both "$(t m_inst_both)"
       menu_item act do_install_hy "$(t m_inst_hy)"
       menu_item act do_install_vl "$(t m_inst_vl)"
+      menu_item act do_install_ss "$(t m_inst_landing)"
       menu_item act self_update "$(t m_selfupdate)"
       ;;
   esac
@@ -3414,25 +4394,26 @@ main_menu() {
 # ---------------------------------------------------------------------------
 usage() {
   cat <<EOF
-nodectl.sh v$SCRIPT_VERSION - Hysteria2 & VLESS-REALITY unified node manager
+nodectl.sh v$SCRIPT_VERSION - Hysteria2, VLESS-REALITY & SS-2022 Landing node manager
 
 Usage: nodectl [command] [target] [options]
 
 Commands:
-  menu                      Interactive menu (default)
-  install [both|hy2|vless]  Install Hysteria2 + VLESS, or a single protocol
-  link [all|hy2|vless]      Show node share link(s)
-  status                    Show service status and listening sockets
-  update [all|hy2|vless]    Update protocol core(s)
-  self-update               Update this management script (keeps node configs)
-  changelog                 Show version changelog
-  bbr [on|off|status]       Kernel TCP BBR (accelerates VLESS TCP & outbound TCP)
-  uninstall [all|hy2|vless] Remove protocol(s) and configurations
+  menu                              Interactive menu (default)
+  install [both|hy2|vless|landing]  Install proxy protocol(s) or SS-2022 landing server
+  outbound [status|set|clear]       Configure relay outbound to a remote SS-2022 landing server
+  link [all|hy2|vless|landing]      Show node share link(s)
+  status                            Show service status and listening sockets
+  update [all|hy2|vless|landing]    Update protocol core(s)
+  self-update                       Update this management script (keeps node configs)
+  changelog                         Show version changelog
+  bbr [on|off|status]               Kernel TCP BBR (accelerates VLESS/SS-2022 TCP & outbound)
+  uninstall [all|hy2|vless|landing] Remove protocol(s) and configurations
 
 Common Options:
   --lang en|zh              UI language (default: en, or env NODECTL_LANG)
-  --port PORT               Listen port (shared in 'both', or for single protocol)
-                            Allowed HTTPS ports: ${ALLOWED_PORTS[*]} (default: 443)
+  --port PORT               Listen port (HTTPS ports ${ALLOWED_PORTS[*]} for hy2/vless;
+                            1024-65535 or 443 for landing)
   -y, --yes                 Answer yes to all confirmations
   -h, --help                Show this help
 
@@ -3454,8 +4435,14 @@ VLESS-REALITY Options:
   --sni DOMAIN              External REALITY target domain (e.g. www.apple.com)
   --uuid UUID               VLESS UUID (default: random)
   --fp FP                   Client uTLS fingerprint: ${ALLOWED_FPS[*]} (default: chrome)
-  --addr HOST               Custom client endpoint host/IP (external mode)
+  --addr HOST               Custom client endpoint host/IP (external / landing mode)
   --vless-name NAME         VLESS node name shown in clients
+
+Landing & Outbound Options (Shadowsocks-2022):
+  --ss-port PORT            SS-2022 landing listen port (default: random free 20000-55000)
+  --ss-password KEY         SS-2022 16-byte Base64 key (default: random)
+  --ss-name NAME            Landing node name
+  --ss-link URI             Remote landing ss:// link (for 'nodectl outbound set')
 EOF
 }
 
@@ -3467,17 +4454,23 @@ parse_args() {
         ;;
       install | link | update | uninstall)
         CMD=$1
-        if [[ ${2:-} =~ ^(both|all|hy2|hysteria|hysteria2|vless|reality)$ ]]; then
+        if [[ ${2:-} =~ ^(both|all|hy2|hysteria|hysteria2|vless|reality|landing|ss|ss2022)$ ]]; then
           TARGET=$2; shift
+        fi
+        ;;
+      outbound)
+        CMD=outbound
+        if [[ ${2:-} =~ ^(status|set|clear)$ ]]; then
+          OUT_ACTION=$2; shift
         fi
         ;;
       bbr)
         CMD=bbr
         if [[ ${2:-} == on || ${2:-} == off || ${2:-} == status ]]; then BBR_ACTION=$2; shift; fi
         ;;
-      --lang | --domain | --port | --hy2-port | --vless-port | --masq | --email | \
-      --password | --name | --hy2-name | --vless-name | --up | --down | --bw-mode | \
-      --sni | --vless-masq | --uuid | --fp | --addr)
+      --lang | --domain | --port | --hy2-port | --vless-port | --ss-port | --masq | --email | \
+      --password | --ss-password | --name | --hy2-name | --vless-name | --ss-name | \
+      --up | --down | --bw-mode | --sni | --vless-masq | --uuid | --fp | --addr | --ss-link)
         [[ $# -ge 2 ]] || die "$(t missing_val "$1")"
         case $1 in
           --lang) UI_LANG=$2; LANG_SET=1 ;;
@@ -3485,12 +4478,15 @@ parse_args() {
           --port) OPT_PORT=$2 ;;
           --hy2-port) OPT_HY_PORT=$2 ;;
           --vless-port) OPT_VL_PORT=$2 ;;
+          --ss-port) OPT_SS_PORT=$2 ;;
           --masq) OPT_MASQ=$2 ;;
           --email) OPT_EMAIL=$2; OPT_EMAIL_SET=1 ;;
           --password) OPT_PASSWORD=$2 ;;
+          --ss-password) OPT_SS_PASSWORD=$2 ;;
           --name) OPT_NAME=$2 ;;
           --hy2-name) OPT_HY_NAME=$2 ;;
           --vless-name) OPT_VL_NAME=$2 ;;
+          --ss-name) OPT_SS_NAME=$2 ;;
           --up) OPT_UP=$2 ;;
           --down) OPT_DOWN=$2 ;;
           --bw-mode) OPT_BW_MODE=$2 ;;
@@ -3499,6 +4495,7 @@ parse_args() {
           --uuid) OPT_UUID=$2 ;;
           --fp) OPT_FP=$2 ;;
           --addr) OPT_ADDR=$2 ;;
+          --ss-link) OPT_SS_LINK=$2 ;;
         esac
         shift
         ;;
@@ -3524,10 +4521,18 @@ main() {
     self-update) if ((ASSUME_YES)); then self_update --yes; else self_update; fi ;;
     changelog) show_changelog "$MIGRATED_FROM" ;;
     install) do_install_dispatch ;;
+    outbound)
+      case $OUT_ACTION in
+        set) do_outbound_set ;;
+        clear) do_outbound_clear ;;
+        *) do_outbound_status ;;
+      esac
+      ;;
     link)
       case ${TARGET,,} in
         hy2 | hysteria | hysteria2) show_share hy2 ;;
         vless | reality) show_share vless ;;
+        landing | ss | ss2022) show_share landing ;;
         *) show_share all ;;
       esac
       ;;
@@ -3535,7 +4540,7 @@ main() {
     update)
       case ${TARGET,,} in
         hy2 | hysteria | hysteria2) do_update_hy ;;
-        vless | reality) do_update_sb ;;
+        vless | reality | landing | ss | ss2022) do_update_sb ;;
         *) do_update_all ;;
       esac
       ;;

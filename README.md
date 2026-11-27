@@ -2,7 +2,7 @@
 
 常用服务器脚本集合，每个脚本独立使用，按需一键下载运行。
 
-- **[nodectl.sh](#nodectlsh)**：Hysteria2 与 VLESS-REALITY 统一一键安装与管理（原 `hy2.sh` 升级版），支持双协议共用 443 端口与伪装站、中/英文菜单、自动证书与节点链接，支持自动平滑升级。
+- **[nodectl.sh](#nodectlsh)**：Hysteria2、VLESS-REALITY 与 SS-2022 落地机统一安装管理脚本（原 `hy2.sh` 升级版），支持双协议共用 443 端口与伪装站、一键设置落地机及线路机出站转发、中/英文菜单、自动证书与平滑升级。
 
   ```bash
   curl -fsSL https://raw.githubusercontent.com/Kaolennoodle/utilities/main/scripts/nodectl.sh | bash -s -- --lang zh
@@ -18,13 +18,18 @@
 
 ## nodectl.sh
 
-[scripts/nodectl.sh](scripts/nodectl.sh) 由原 `hy2.sh` 演进升级而来（当前 v2.0.0），面向 Ubuntu 26.04 LTS，以 root 运行。支持单独或同时部署 **Hysteria2**（官方 `hysteria` 内核）与 **VLESS + XTLS-Vision + REALITY**（官方 `sing-box` 内核，原生兼容 Mihomo / Clash.Meta 系客户端），提供交互菜单、自动证书管理、443 端口与伪装站点无冲突复用、纯节点分享链接输出、内核 TCP BBR 开关、内核与脚本更新、配置回滚及卸载功能。
+[scripts/nodectl.sh](scripts/nodectl.sh) 由原 `hy2.sh` 演进升级而来（当前 v2.1.0），面向 Ubuntu 26.04 LTS，以 root 运行。支持部署 **Hysteria2**（官方 `hysteria` 内核）、**VLESS + XTLS-Vision + REALITY**（官方 `sing-box` 内核，原生兼容 Mihomo / Clash.Meta 系客户端）以及 **Shadowsocks-2022 落地机与线路机统一出站转发**，提供交互菜单、自动证书管理、443 端口与伪装站点无冲突复用、纯节点分享链接输出、内核 TCP BBR 开关、内核与脚本更新、配置回滚及卸载功能。
 
 - **运行方式与快捷指令**：管道运行时菜单从当前终端读取输入，参数放在 `bash -s --` 之后。安装后自动写入 `/usr/local/bin/nodectl` 快捷指令，之后直接输入 `nodectl` 即可打开管理菜单。
-- **部署方案与伪装协同（无需 Nginx）**：
+- **四种部署形态与伪装协同（无需 Nginx）**：
   1. **Hysteria2 + VLESS 同时部署（推荐）**：Hysteria2 监听公网 `UDP 443`（承载 QUIC 代理与 HTTP/3 伪装）并在 `TCP 80` 自动申请/续期 Let's Encrypt 证书，同时将其 HTTPS 伪装监听自动绑定至本机回环 `127.0.0.1:18443`；VLESS (`sing-box`) 前置监听公网 `TCP 443`，合法客户端进入 `VLESS + XTLS-Vision` 隧道，普通浏览器访问或主动探测流量则通过 REALITY 原样透传给 `127.0.0.1:18443`（返回本机域名的真实证书与反代网页，即使反代源位于 Cloudflare 后方也不会产生 CDN 指纹冲突）。
   2. **仅部署 Hysteria2**：监听常见 HTTPS 端口（默认 `443`，UDP 代理 + 公网 TCP 伪装站同步监听）。
   3. **仅部署 VLESS (REALITY)**：免域名、免 80 端口、免证书，自动探测本机公网 IPv4/IPv6，握手回落至外部合规 TLS 1.3 站点（自动校验 TLS 1.3 并对 Cloudflare 等 CDN 目标给出风险提示）。
+  4. **将本机设置为落地机（Shadowsocks-2022）**：使用 `sing-box` 部署 `2022-blake3-aes-128-gcm`（16 字节 Base64 密钥，默认随机空闲高位端口 TCP+UDP 监听，自动检测 NTP 时间同步），输出标准 `ss://` 链接供线路机一键接入。
+- **线路机统一出站转发（连接远端落地机）**：
+  - 在已部署 Hysteria2 和/或 VLESS 的线路机上，可通过菜单「落地机 / 出站设置」或命令 `nodectl outbound set --ss-link 'ss://...'` 直接粘贴落地机生成的 `ss://` 链接（也支持手动填写）。
+  - **双协议共享同一落地出口**：VLESS 在 `sing-box` 内部直接通过 `Shadowsocks-2022` 出站转发；Hysteria2 通过本机回环 `127.0.0.1:18080` SOCKS5 桥接接入本机 `sing-box` 出站（仅装 Hysteria2 时也会自动按需拉起本地回环桥接，不占用任何公网端口）。
+  - **防 DNS 泄漏**：转发流量保持域名状态直达落地机，由落地机本地完成最终 DNS 解析；客户端仍只需导入原有的单条节点链接，无需配置链式代理。
 - **客户端兼容性**：VLESS 服务端采用官方 `sing-box` 内核，避免新版 Xray 强制 `minClientVer` 与后量子 `X25519MLKEM768` 校验导致 Mihomo 系客户端（Clash Verge Rev、FlClash、OpenClash 等）导入 `vless://` 链接静默断流的问题；支持选择客户端 uTLS 指纹（默认 `chrome`）。
 - **监听端口**：支持常见 HTTPS 端口（`443` 默认，`8443`、`2053`、`2083`、`2087`、`2096`）。双协议单独卸载任意一方时，另一方的监听与伪装会自动平滑恢复或引导切换。
 - **防火墙（ufw）**：脚本不主动修改 ufw 规则；检测到 ufw 已启用时提示需手动放行的端口与命令（同时提醒在云安全组放行）。
